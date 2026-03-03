@@ -33,11 +33,14 @@ from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # no
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
-    koch_follower,
     make_robot_from_config,
-    so100_follower,
-    so101_follower,
+    # koch_follower,
+    # so100_follower,
+    # so101_follower,
 )
+from lerobot.robots import koch_follower  # noqa: F401
+from lerobot.robots import so_follower as so100_follower  # noqa: F401
+from lerobot.robots import so_follower as so101_follower  # noqa: F401
 from lerobot.utils.utils import init_logging, log_say
 import numpy as np
 
@@ -170,7 +173,7 @@ class EvalConfig:
     action_horizon: int = 8
     lang_instruction: str = "Grab markers and place into pen holder."
     play_sounds: bool = False
-    timeout: int = 60
+    timeout: int = 30
 
 
 # =============================================================================

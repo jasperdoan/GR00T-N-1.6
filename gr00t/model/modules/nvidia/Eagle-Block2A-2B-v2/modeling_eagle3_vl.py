@@ -93,9 +93,11 @@ class Eagle3_VLForConditionalGeneration(Eagle3_VLPreTrainedModel, GenerationMixi
             if config.vision_config.model_type == 'intern_vit_6b':
                 self.vision_model = InternVisionModel(config.vision_config)
             elif config.vision_config.model_type == 'siglip_vision_model':
+                # config.vision_config._attn_implementation = config._attn_implementation
                 config.vision_config._attn_implementation = 'flash_attention_2'
                 self.vision_model = SiglipVisionModel(config.vision_config)
             elif config.vision_config.model_type == 'siglip2_vision_model':
+                # config.vision_config._attn_implementation = config._attn_implementation
                 config.vision_config._attn_implementation = 'flash_attention_2'
                 self.vision_model = Siglip2VisionModel(config.vision_config)
             elif config.vision_config.model_type == 'radio':
@@ -109,9 +111,11 @@ class Eagle3_VLForConditionalGeneration(Eagle3_VLPreTrainedModel, GenerationMixi
             elif config.text_config.architectures[0] == 'Phi3ForCausalLM':
                 self.language_model = Phi3ForCausalLM(config.text_config)
             elif config.text_config.architectures[0] == 'Qwen2ForCausalLM':
+                # config.text_config._attn_implementation = config._attn_implementation
                 assert config.text_config._attn_implementation == 'flash_attention_2', f"Qwen2 must use flash_attention_2 but got {config.text_config._attn_implementation}"
                 self.language_model = Qwen2ForCausalLM(config.text_config)
             elif config.text_config.architectures[0] == 'Qwen3ForCausalLM':
+                # config.text_config._attn_implementation = config._attn_implementation
                 assert config.text_config._attn_implementation == 'flash_attention_2', f"Qwen3 must use flash_attention_2 but got {config.text_config._attn_implementation}"
                 self.language_model = Qwen3ForCausalLM(config.text_config)
             else:
