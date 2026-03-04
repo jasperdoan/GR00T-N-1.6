@@ -1,9 +1,4 @@
-# NVIDIA Isaac GR00T N1.6 
-
-An open vision-language-action (VLA) model for generalized humanoid robot skills. This cross-embodiment model takes multimodal input, including language and images, to perform manipulation tasks in diverse environments.
-
-
-# GR00T-N1.6 Training, Deployment, and Optimization Guide
+# GR00T-N1.5 Training, Deployment, and Optimization Guide
 
 This document outlines the workflow for migrating from data collection to production-level inference on the NVIDIA Jetson Orin. The process is divided between a Workstation (PC) for training/export and the Jetson Orin for optimized deployment.
 
@@ -96,9 +91,20 @@ The TensorRT engine **must** be built on the target hardware (Jetson) to match t
 ```bash
 python3 -m scripts.deployment.build_tensorrt_engine \
     --onnx /workspaces/isaac_ros-dev/models/groot_n1d6_onnx/dit_model.onnx \
-    --engine /workspaces/isaac_ros-dev/models/groot_n1d6_onnx/dit_model_bf16.trt \
-    --precision bf16
+    --engine /workspaces/isaac_ros-dev/models/groot_n1d6_onnx/dit_model_fp16.trt \
+    --precision fp16
 ```
+
+### Precision Options for TensorRT
+
+| Precision | Bits | Speed (Orin) | Accuracy | Best For... |
+| :--- | :--- | :--- | :--- | :--- |
+| **FP32** | 32 | Slowest (1x) | Highest | Debugging / Reference |
+| **BF16** | 16 | Medium (2x) | Very High | Training / Generative AI |
+| **FP16** | 16 | Fast (2.5x) | High | **Standard Jetson Deployment** |
+| **FP8** | 8 | Very Fast (3.5x) | Medium | New Ampere/Hopper hardware |
+| **INT8** | 8 | Fastest (4x) | Variable | **Maximum Throughput (Requires Calibration)** |
+
 
 ### Technical Note: The Role of DiT and TensorRT
 The **Diffusion Transformer (DiT)** serves as the "Action Head." It iteratively denoises visual and language embeddings to generate motor commands. Because it runs multiple iterations per inference, it is the primary bottleneck.
@@ -168,8 +174,9 @@ so100_inference_checkpoint
 ```bash
 PYTHONPATH=. python gr00t/eval/run_gr00t_trt_server.py \
   --model-path /workspaces/isaac_ros-dev/models/so100_inference_checkpoint \
-  --trt-engine-path /workspaces/isaac_ros-dev/models/groot_n1d6_onnx/dit_model_bf16.trt \
+  --trt-engine-path /workspaces/isaac_ros-dev/models/groot_n1d6_onnx/dit_model_fp16.trt \
   --embodiment-tag NEW_EMBODIMENT \
+  --compile-backbone True \
   --port 5555
 ```
 
@@ -183,6 +190,7 @@ PYTHONPATH=. python gr00t/eval/real_robot/SO100/eval_so100.py \
   --policy_host=localhost \
   --policy_port=5555 \
   --action_horizon 16 \
+  --camera_wh "(320, 240)" \
   --lang_instruction="Grab pen and place into pen holder"
 ```
 

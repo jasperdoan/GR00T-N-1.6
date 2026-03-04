@@ -26,6 +26,7 @@ import time
 from typing import Any, Dict, List
 
 import draccus
+import cv2
 from gr00t.policy.server_client import PolicyClient
 
 # Importing various robot configs ensures CLI autocompletion works
@@ -78,8 +79,9 @@ class So100Adapter:
         • Decoding model action chunks into real robot actions
     """
 
-    def __init__(self, policy_client: PolicyClient):
+    def __init__(self, policy_client: PolicyClient, camera_wh: tuple = None):
         self.policy = policy_client
+        self.camera_wh = camera_wh  # (width, height) passed to cv2.resize, or None
 
         # SO100 joint ordering used for BOTH training + robot execution
         self.robot_state_keys = [
@@ -102,8 +104,13 @@ class So100Adapter:
         """
         model_obs = {}
 
-        # (1) Cameras
-        model_obs["video"] = {k: obs[k] for k in self.camera_keys}
+        # (1) Cameras — optionally downscale before sending to server
+        model_obs["video"] = {}
+        for k in self.camera_keys:
+            img = obs[k]
+            if self.camera_wh is not None:
+                img = cv2.resize(img, self.camera_wh, interpolation=cv2.INTER_LINEAR)
+            model_obs["video"][k] = img
 
         # (2) Arm + gripper state
         state = np.array([obs[k] for k in self.robot_state_keys], dtype=np.float32)
@@ -174,6 +181,10 @@ class EvalConfig:
     lang_instruction: str = "Grab markers and place into pen holder."
     play_sounds: bool = False
     timeout: int = 30
+    camera_wh: tuple = None
+    """Resize camera frames to (width, height) before sending to policy server.
+    e.g. (320, 240) halves the data size vs default 640x480.
+    None = no resize (original camera resolution)."""
 
 
 # =============================================================================
@@ -201,7 +212,7 @@ def eval(cfg: EvalConfig):
     # 2. Initialize Policy Wrapper + Client
     # -------------------------------------------------------------------------
     policy_client = PolicyClient(host=cfg.policy_host, port=cfg.policy_port)
-    policy = So100Adapter(policy_client)
+    policy = So100Adapter(policy_client, camera_wh=cfg.camera_wh)
 
     log_say(
         f'Policy ready with instruction: "{cfg.lang_instruction}"',
