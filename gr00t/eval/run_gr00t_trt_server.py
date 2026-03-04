@@ -19,6 +19,7 @@ over ZMQ and is agnostic to whether the server uses PyTorch or TensorRT.
 from dataclasses import dataclass
 import logging
 import os
+import time
 
 import torch
 import tyro
@@ -34,12 +35,19 @@ from gr00t.policy.server_client import PolicyServer
 
 
 class TensorRTDiTWrapper:
-    """Wrapper that runs the DiT model through a TensorRT engine."""
+    """Wrapper that runs the DiT model through a TensorRT engine.
+
+    Optimizations over naive approach:
+    - Pre-allocates output buffer and reuses it across calls
+    - Caches input shapes to skip redundant set_input_shape calls
+    - Reuses a dedicated CUDA stream for TRT execution
+    """
 
     def __init__(self, engine_path: str, device: int = 0):
         import tensorrt as trt
 
         self.device = device
+        self._cuda_device = f"cuda:{device}"
 
         if torch.cuda.is_available():
             torch.cuda.init()
@@ -58,26 +66,42 @@ class TensorRTDiTWrapper:
             raise RuntimeError(f"Failed to load TensorRT engine from {engine_path}")
 
         self.context = self.engine.create_execution_context()
+
+        # Dedicated CUDA stream for TRT execution
+        self._stream = torch.cuda.Stream(device=device)
+
+        # Cache for pre-allocated output buffer and last-seen input shapes
+        self._output_buffer = None
+        self._cached_shapes = {}
+
         logging.info(f"TensorRT engine loaded: {engine_path}")
+
+    def _set_shape_if_changed(self, name: str, tensor: torch.Tensor):
+        """Only call set_input_shape when the shape actually changes."""
+        shape = tuple(tensor.shape)
+        if self._cached_shapes.get(name) != shape:
+            self.context.set_input_shape(name, shape)
+            self._cached_shapes[name] = shape
 
     def __call__(self, sa_embs, vl_embs, timestep, image_mask=None, backbone_attention_mask=None):
         """Forward pass through TensorRT DiT."""
-        sa_embs = sa_embs.to(f"cuda:{self.device}").contiguous()
-        vl_embs = vl_embs.to(f"cuda:{self.device}").contiguous()
-        timestep = timestep.to(f"cuda:{self.device}").contiguous()
+        sa_embs = sa_embs.to(self._cuda_device).contiguous()
+        vl_embs = vl_embs.to(self._cuda_device).contiguous()
+        timestep = timestep.to(self._cuda_device).contiguous()
 
         if image_mask is not None:
-            image_mask = image_mask.to(f"cuda:{self.device}").contiguous()
+            image_mask = image_mask.to(self._cuda_device).contiguous()
         if backbone_attention_mask is not None:
-            backbone_attention_mask = backbone_attention_mask.to(f"cuda:{self.device}").contiguous()
+            backbone_attention_mask = backbone_attention_mask.to(self._cuda_device).contiguous()
 
-        self.context.set_input_shape("sa_embs", sa_embs.shape)
-        self.context.set_input_shape("vl_embs", vl_embs.shape)
-        self.context.set_input_shape("timestep", timestep.shape)
+        # Set shapes only when they change (they stay constant across diffusion steps)
+        self._set_shape_if_changed("sa_embs", sa_embs)
+        self._set_shape_if_changed("vl_embs", vl_embs)
+        self._set_shape_if_changed("timestep", timestep)
         if image_mask is not None:
-            self.context.set_input_shape("image_mask", image_mask.shape)
+            self._set_shape_if_changed("image_mask", image_mask)
         if backbone_attention_mask is not None:
-            self.context.set_input_shape("backbone_attention_mask", backbone_attention_mask.shape)
+            self._set_shape_if_changed("backbone_attention_mask", backbone_attention_mask)
 
         self.context.set_tensor_address("sa_embs", sa_embs.data_ptr())
         self.context.set_tensor_address("vl_embs", vl_embs.data_ptr())
@@ -89,17 +113,23 @@ class TensorRTDiTWrapper:
                 "backbone_attention_mask", backbone_attention_mask.data_ptr()
             )
 
-        output_shape = self.context.get_tensor_shape("output")
-        output = torch.empty(
-            tuple(output_shape), dtype=torch.bfloat16, device=f"cuda:{self.device}"
-        )
-        self.context.set_tensor_address("output", output.data_ptr())
+        # Pre-allocate or reuse output buffer
+        output_shape = tuple(self.context.get_tensor_shape("output"))
+        if self._output_buffer is None or self._output_buffer.shape != output_shape:
+            self._output_buffer = torch.empty(
+                output_shape, dtype=torch.bfloat16, device=self._cuda_device
+            )
+        self.context.set_tensor_address("output", self._output_buffer.data_ptr())
 
-        success = self.context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+        # Execute on dedicated stream
+        with torch.cuda.stream(self._stream):
+            success = self.context.execute_async_v3(self._stream.cuda_stream)
+        self._stream.synchronize()
+
         if not success:
             raise RuntimeError("TensorRT inference failed")
 
-        return output
+        return self._output_buffer
 
 
 def replace_dit_with_tensorrt(policy: Gr00tPolicy, trt_engine_path: str, device: int = 0):
@@ -175,6 +205,9 @@ class TRTServerConfig:
     strict: bool = True
     """Whether to enforce strict input and output validation"""
 
+    num_inference_timesteps: int = 4
+    """Number of diffusion denoising steps (default 4). Lower = faster but less precise. Try 2 for ~2x DiT speedup."""
+
 
 def main(config: TRTServerConfig):
     logging.basicConfig(level=logging.INFO)
@@ -208,15 +241,33 @@ def main(config: TRTServerConfig):
         device=config.device,
         strict=config.strict,
     )
-    # policy.model.num_inference_timesteps = 4 # CHANGE THIS AROUND
-    print("      Policy loaded.")
+    policy.model.num_inference_timesteps = config.num_inference_timesteps
+    print(f"      Policy loaded (diffusion steps: {config.num_inference_timesteps}).")
 
     # Step 2: Replace DiT forward with TensorRT engine
     print("[2/3] Replacing DiT action head with TensorRT engine...")
     replace_dit_with_tensorrt(policy, config.trt_engine_path)
     print("      TensorRT engine active.")
 
-    # Step 3: Start ZMQ server
+    # Step 3: Wrap get_action with Hz logging
+    _original_get_action = policy.get_action
+    _inference_count = [0]
+    _inference_time_sum = [0.0]
+
+    def _timed_get_action(*args, **kwargs):
+        t0 = time.perf_counter()
+        result = _original_get_action(*args, **kwargs)
+        elapsed = time.perf_counter() - t0
+        _inference_count[0] += 1
+        _inference_time_sum[0] += elapsed
+        hz = 1.0 / elapsed if elapsed > 0 else float("inf")
+        avg_hz = _inference_count[0] / _inference_time_sum[0] if _inference_time_sum[0] > 0 else 0
+        print(f"[Server] Inference #{_inference_count[0]}: {elapsed*1000:.1f}ms ({hz:.1f} Hz) | Avg: {avg_hz:.1f} Hz")
+        return result
+
+    policy.get_action = _timed_get_action
+
+    # Step 4: Start ZMQ server
     print("[3/3] Starting ZMQ server...")
     server = PolicyServer(
         policy=policy,

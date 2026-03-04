@@ -212,23 +212,23 @@ def eval(cfg: EvalConfig):
     # -------------------------------------------------------------------------
     # 3. Main real-time control loop
     # -------------------------------------------------------------------------
+    inference_count = 0
+    inference_time_sum = 0.0
+
     while True:
         obs = robot.get_observation()
         obs["lang"] = cfg.lang_instruction  # insert language
 
-        # obs = {
-        #     "front": np.zeros((480, 640, 3), dtype=np.uint8),
-        #     "wrist": np.zeros((480, 640, 3), dtype=np.uint8),
-        #     "shoulder_pan.pos": 0.0,
-        #     "shoulder_lift.pos": 0.0,
-        #     "elbow_flex.pos": 0.0,
-        #     "wrist_flex.pos": 0.0,
-        #     "wrist_roll.pos": 0.0,
-        #     "gripper.pos": 0.0,
-        #     "lang": cfg.lang_instruction,
-        # }
-
+        t_inference_start = time.time()
         actions = policy.get_action(obs)
+        t_inference_end = time.time()
+
+        inference_elapsed = t_inference_end - t_inference_start
+        inference_count += 1
+        inference_time_sum += inference_elapsed
+        policy_hz = 1.0 / inference_elapsed if inference_elapsed > 0 else float("inf")
+        avg_hz = inference_count / inference_time_sum if inference_time_sum > 0 else 0
+        print(f"[Client] Policy call #{inference_count}: {inference_elapsed*1000:.1f}ms ({policy_hz:.1f} Hz) | Avg: {avg_hz:.1f} Hz")
 
         for i, action_dict in enumerate(actions[: cfg.action_horizon]):
             tic = time.time()
