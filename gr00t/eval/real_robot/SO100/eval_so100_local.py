@@ -7,15 +7,15 @@ frame for two 640x480 cameras), it calls policy.get_action() directly.
 
 Usage (on Jetson Orin, inside Docker container):
     PYTHONPATH=. python gr00t/eval/real_robot/SO100/eval_so100_local.py \
-        --model-path /workspaces/isaac_ros-dev/models/so100_inference_checkpoint \
-        --trt-engine-path /workspaces/isaac_ros-dev/models/groot_n1d6_onnx/dit_model_fp16.trt \
-        --embodiment-tag NEW_EMBODIMENT \
+        --model_path /workspaces/isaac_ros-dev/models/so100_inference_checkpoint \
+        --trt_engine_path /workspaces/isaac_ros-dev/models/groot_n1d6_onnx/dit_model_fp16.trt \
+        --embodiment_tag NEW_EMBODIMENT \
         --robot.type=so101_follower \
         --robot.port=/dev/ttyACM0 \
         --robot.id=follower_arm \
         --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}" \
-        --action-horizon 16 \
-        --lang-instruction "Grab pen and place into pen holder"
+        --action_horizon 16 \
+        --lang_instruction "Grab pen and place into pen holder"
 """
 
 # =============================================================================
@@ -131,7 +131,9 @@ class TensorRTDiTWrapper:
         if not success:
             raise RuntimeError("TensorRT inference failed")
 
-        return self._output_buffer
+        # Clone so the caller gets a stable tensor that won't be
+        # overwritten on the next diffusion step.
+        return self._output_buffer.clone()
 
 
 def replace_dit_with_tensorrt(policy: Gr00tPolicy, trt_engine_path: str, device: int = 0):

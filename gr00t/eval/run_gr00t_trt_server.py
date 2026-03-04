@@ -129,7 +129,9 @@ class TensorRTDiTWrapper:
         if not success:
             raise RuntimeError("TensorRT inference failed")
 
-        return self._output_buffer
+        # Clone so the caller gets a stable tensor that won't be
+        # overwritten on the next diffusion step.
+        return self._output_buffer.clone()
 
 
 def replace_dit_with_tensorrt(policy: Gr00tPolicy, trt_engine_path: str, device: int = 0):
