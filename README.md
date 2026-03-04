@@ -176,7 +176,7 @@ PYTHONPATH=. python gr00t/eval/run_gr00t_trt_server.py \
   --model-path /workspaces/isaac_ros-dev/models/so100_inference_checkpoint \
   --trt-engine-path /workspaces/isaac_ros-dev/models/groot_n1d6_onnx/dit_model_fp16.trt \
   --embodiment-tag NEW_EMBODIMENT \
-  --compile-backbone True \
+  --compile-backbone \
   --port 5555
 ```
 
@@ -190,7 +190,8 @@ PYTHONPATH=. python gr00t/eval/real_robot/SO100/eval_so100.py \
   --policy_host=localhost \
   --policy_port=5555 \
   --action_horizon 16 \
-  --camera_wh "(320, 240)" \
+  --camera_w 320 \ 
+  --camera_h 240 \
   --lang_instruction="Grab pen and place into pen holder"
 ```
 

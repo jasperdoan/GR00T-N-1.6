@@ -181,10 +181,11 @@ class EvalConfig:
     lang_instruction: str = "Grab markers and place into pen holder."
     play_sounds: bool = False
     timeout: int = 30
-    camera_wh: tuple = None
-    """Resize camera frames to (width, height) before sending to policy server.
-    e.g. (320, 240) halves the data size vs default 640x480.
-    None = no resize (original camera resolution)."""
+    camera_w: int = 0
+    camera_h: int = 0
+    """Resize camera frames to this resolution before sending to policy server.
+    e.g. --camera_w 320 --camera_h 240 halves the data vs default 640x480.
+    Leave at 0 (default) to send original camera resolution."""
 
 
 # =============================================================================
@@ -212,7 +213,8 @@ def eval(cfg: EvalConfig):
     # 2. Initialize Policy Wrapper + Client
     # -------------------------------------------------------------------------
     policy_client = PolicyClient(host=cfg.policy_host, port=cfg.policy_port)
-    policy = So100Adapter(policy_client, camera_wh=cfg.camera_wh)
+    camera_wh = (cfg.camera_w, cfg.camera_h) if cfg.camera_w > 0 and cfg.camera_h > 0 else None
+    policy = So100Adapter(policy_client, camera_wh=camera_wh)
 
     log_say(
         f'Policy ready with instruction: "{cfg.lang_instruction}"',
