@@ -1,4 +1,4 @@
-# GR00T-N1.5 Training, Deployment, and Optimization Guide
+# GR00T-N1.6 Training, Deployment, and Optimization Guide
 
 This document outlines the workflow for migrating from data collection to production-level inference on the NVIDIA Jetson Orin. The process is divided between a Workstation (PC) for training/export and the Jetson Orin for optimized deployment.
 
@@ -190,8 +190,6 @@ PYTHONPATH=. python gr00t/eval/real_robot/SO100/eval_so100.py \
   --policy_host=localhost \
   --policy_port=5555 \
   --action_horizon 16 \
-  --camera_w 320 \ 
-  --camera_h 240 \
   --lang_instruction="Grab pen and place into pen holder"
 ```
 
