@@ -195,11 +195,6 @@ class TRTServerConfig:
     strict: bool = True
     """Whether to enforce strict input and output validation"""
 
-    compile_backbone: bool = False
-    """Compile the vision+language backbone with torch.compile (reduce-overhead mode).
-    Speeds up repeated inference by ~10-30% after a one-time JIT warmup on
-    the first two requests. Keep False if you need the server ready instantly."""
-
 
 def main(config: TRTServerConfig):
     logging.basicConfig(level=logging.INFO)
@@ -235,14 +230,6 @@ def main(config: TRTServerConfig):
     )
     # policy.model.num_inference_timesteps = 4 # CHANGE THIS AROUND
     print("      Policy loaded.")
-
-    if config.compile_backbone:
-        print("      Compiling backbone with torch.compile (reduce-overhead)...")
-        print("      NOTE: first 1-2 inference calls will be slow (JIT compilation).")
-        policy.model.backbone = torch.compile(
-            policy.model.backbone, mode="reduce-overhead"
-        )
-        print("      Backbone compiled.")
 
     # Step 2: Replace DiT forward with TensorRT engine
     print("[2/3] Replacing DiT action head with TensorRT engine...")
