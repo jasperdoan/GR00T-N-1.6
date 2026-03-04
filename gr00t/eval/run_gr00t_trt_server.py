@@ -58,23 +58,7 @@ class TensorRTDiTWrapper:
             raise RuntimeError(f"Failed to load TensorRT engine from {engine_path}")
 
         self.context = self.engine.create_execution_context()
-
-        # Dedicated CUDA stream — avoids TRT inserting cudaStreamSynchronize
-        # calls on the default stream, which cause unnecessary stalls.
-        self.stream = torch.cuda.Stream(device=device)
-
-        # Auto-detect output dtype from the engine so this wrapper works with
-        # both bf16 and fp16 engines without manual changes.
-        _trt_to_torch = {
-            trt.DataType.FLOAT: torch.float32,
-            trt.DataType.HALF: torch.float16,
-            trt.DataType.BF16: torch.bfloat16,
-        }
-        trt_out_dtype = self.engine.get_tensor_dtype("output")
-        self.output_dtype = _trt_to_torch.get(trt_out_dtype, torch.float16)
-
         logging.info(f"TensorRT engine loaded: {engine_path}")
-        logging.info(f"TRT output dtype: {trt_out_dtype} → {self.output_dtype}")
 
     def __call__(self, sa_embs, vl_embs, timestep, image_mask=None, backbone_attention_mask=None):
         """Forward pass through TensorRT DiT."""
@@ -107,15 +91,11 @@ class TensorRTDiTWrapper:
 
         output_shape = self.context.get_tensor_shape("output")
         output = torch.empty(
-            tuple(output_shape), dtype=self.output_dtype, device=f"cuda:{self.device}"
+            tuple(output_shape), dtype=torch.bfloat16, device=f"cuda:{self.device}"
         )
         self.context.set_tensor_address("output", output.data_ptr())
 
-        with torch.cuda.stream(self.stream):
-            success = self.context.execute_async_v3(self.stream.cuda_stream)
-        # Ensure the output is ready on the caller's stream before returning.
-        torch.cuda.current_stream().wait_stream(self.stream)
-
+        success = self.context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
         if not success:
             raise RuntimeError("TensorRT inference failed")
 
