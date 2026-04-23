@@ -14,7 +14,6 @@ Move the downloaded models into the `models/` directory. Your repository structu
 
 ```text
 .
-├── docs/
 ├── gr00t/                              # Core logic and policies
 ├── models/
 │   ├── groot_n1d6_onnx/                # ONNX model files
