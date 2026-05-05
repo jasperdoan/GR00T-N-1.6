@@ -62,7 +62,7 @@ if __name__ == "__main__":
     config.model.random_rotation_angle = ft_config.random_rotation_angle
     config.model.color_jitter_params = ft_config.color_jitter_params
 
-    config.model.load_bf16 = False
+    config.model.load_bf16 = True
     config.model.reproject_vision = False
     config.model.eagle_collator = True
     config.model.model_name = "nvidia/Eagle-Block2A-2B-v2"
@@ -84,6 +84,8 @@ if __name__ == "__main__":
     config.training.weight_decay = ft_config.weight_decay
     config.training.warmup_ratio = ft_config.warmup_ratio
     config.training.wandb_project = "finetune-gr00t-n1d6"
+    config.training.bf16 = True    # Add this line to ensure the trainer uses BF16
+    config.training.fp16 = False   # Ensure FP16 is off
 
     config.data.shard_size = ft_config.shard_size
     config.data.episode_sampling_rate = ft_config.episode_sampling_rate

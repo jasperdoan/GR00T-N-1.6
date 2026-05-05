@@ -13,9 +13,11 @@ Move your recorded LeRobot dataset into a `demo_data/` directory and run:
 
 ```bash
 python3 scripts/lerobot_conversion/convert_v3_to_v2.py \
-    --repo-id clean_table \
+    --repo-id cube \
     --root demo_data
 ```
+
+Then move `examples/SO100/modality.json` to `demo_data/cube/meta/modality.json` to ensure the correct modality configuration is included in the dataset.
 
 ---
 
@@ -26,20 +28,21 @@ Finetuning should be performed on a workstation with high VRAM. The following co
 ```bash
 python3 -m gr00t.experiment.launch_finetune \
     --base_model_path nvidia/GR00T-N1.6-3B \
-    --dataset_path demo_data/clean_table \
+    --dataset_path demo_data/cube \
     --modality_config_path examples/SO100/so100_config.py \
     --embodiment_tag NEW_EMBODIMENT \
     --num_gpus 1 \
     --output_dir ~/Desktop/models/so100_finetune \
-    --save_steps 2000 \
-    --save_total_limit 5 \
-    --max_steps 20000 \
+    --save_steps 5000 \
+    --save_total_limit 1 \
+    --max_steps 10000 \
     --random_rotation_angle 5 \
     --warmup_ratio 0.1 \
-    --state_dropout_prob 0.1 \
-    --weight_decay 1e-4 \
-    --learning_rate 1e-4 \
+    --state_dropout_prob 0.2 \
+    --weight_decay 1e-3 \
+    --learning_rate 5e-5 \
     --global_batch_size 32 \
+    --gradient_accumulation_steps 8 \
     --color_jitter_params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
     --episode_sampling_rate 1.0 \
     --dataloader_num_workers 4
@@ -79,8 +82,8 @@ Exporting the model to ONNX requires significant RAM and disk space. This step i
 
 ```bash
 PYTHONPATH=. python scripts/deployment/export_onnx_n1d6.py \
-  --model_path ~/Desktop/models/so100_finetune/checkpoint-20000 \
-  --dataset_path ~/Desktop/Isaac-GR00T/demo_data/clean_table \
+  --model_path ~/Desktop/models/so100_finetune/checkpoint-10000 \
+  --dataset_path ~/Desktop/Isaac-GR00T/demo_data/cube \
   --embodiment_tag new_embodiment \
   --output_dir ~/Desktop/models/groot_n1d6_onnx
 ```
