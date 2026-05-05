@@ -1,250 +1,192 @@
-"""
-SO100 Real-Robot Gr00T Policy Evaluation Script
-
-This script runs closed-loop policy evaluation on the SO100 / SO101 robots
-using the GR00T Policy API.
-
-Major responsibilities:
-    • Initialize robot hardware from a RobotConfig (LeRobot)
-    • Convert robot observations into GR00T VLA inputs
-    • Query the GR00T policy server (PolicyClient)
-    • Decode multi-step (temporal) model actions back into robot motor commands
-    • Stream actions to the real robot in real time
-
-This file is meant to be a simple, readable reference
-for real-world policy debugging and demos.
-"""
-
-# =============================================================================
-# Imports
-# =============================================================================
-
-from dataclasses import asdict, dataclass
 import logging
-from pprint import pformat
+import threading
 import time
+from dataclasses import asdict, dataclass
+from pprint import pformat
 from typing import Any, Dict, List
 
 import draccus
-from gr00t.policy.server_client import PolicyClient
-
-# Importing various robot configs ensures CLI autocompletion works
-from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
-from lerobot.robots import (  # noqa: F401
-    Robot,
-    RobotConfig,
-    make_robot_from_config,
-    # koch_follower,
-    # so100_follower,
-    # so101_follower,
-)
-from lerobot.robots import koch_follower  # noqa: F401
-from lerobot.robots import so_follower as so100_follower  # noqa: F401
-from lerobot.robots import so_follower as so101_follower  # noqa: F401
-from lerobot.utils.utils import init_logging, log_say
 import numpy as np
+from gr00t.policy.server_client import PolicyClient
+from lerobot.robots import RobotConfig, make_robot_from_config
+from lerobot.utils.utils import init_logging, log_say
 
 
-def recursive_add_extra_dim(obs: Dict) -> Dict:
-    """
-    Recursively add an extra dim to arrays or scalars.
-
-    GR00T Policy Server expects:
-        obs: (batch=1, time=1, ...)
-    Calling this function twice achieves that.
-    """
-    for key, val in obs.items():
-        if isinstance(val, np.ndarray):
-            obs[key] = val[np.newaxis, ...]
-        elif isinstance(val, dict):
-            obs[key] = recursive_add_extra_dim(val)
-        else:
-            obs[key] = [val]  # scalar → [scalar]
-    return obs
-
+# =============================================================================
+# 1. So100 Adapter (Data Formatting)
+# =============================================================================
 
 class So100Adapter:
-    """
-    Adapter between:
-        • Raw robot observation dictionary
-        • GR00T VLA input format
-        • GR00T action chunk → robot joint commands
-
-    Responsible for:
-        • Packaging camera frames as obs["video"]
-        • Building obs["state"] for arm + gripper
-        • Adding language instruction
-        • Adding batch/time dimensions
-        • Decoding model action chunks into real robot actions
-    """
-
+    """Formats robot data for GR00T and decodes model outputs."""
     def __init__(self, policy_client: PolicyClient):
         self.policy = policy_client
-
-        # SO100 joint ordering used for BOTH training + robot execution
         self.robot_state_keys = [
-            "shoulder_pan.pos",
-            "shoulder_lift.pos",
-            "elbow_flex.pos",
-            "wrist_flex.pos",
-            "wrist_roll.pos",
-            "gripper.pos",
+            "shoulder_pan.pos", "shoulder_lift.pos", "elbow_flex.pos",
+            "wrist_flex.pos", "wrist_roll.pos", "gripper.pos",
         ]
-
         self.camera_keys = ["front", "wrist"]
 
-    # -------------------------------------------------------------------------
-    # Observation → Model Input
-    # -------------------------------------------------------------------------
+    def recursive_add_extra_dim(self, obs: Any) -> Any:
+        """Adds B=1, T=1 dimensions required by GR00T server."""
+        if isinstance(obs, dict):
+            return {k: self.recursive_add_extra_dim(v) for k, v in obs.items()}
+        elif isinstance(obs, np.ndarray):
+            return obs[np.newaxis, ...]
+        return [obs]
+
     def obs_to_policy_inputs(self, obs: Dict[str, Any]) -> Dict:
-        """
-        Convert raw robot observation dict into the structured GR00T VLA input.
-        """
-        model_obs = {}
-
-        # (1) Cameras
-        model_obs["video"] = {k: obs[k] for k in self.camera_keys}
-
-        # (2) Arm + gripper state
+        """Converts raw robot dict to GR00T VLA input format."""
         state = np.array([obs[k] for k in self.robot_state_keys], dtype=np.float32)
-        model_obs["state"] = {
-            "single_arm": state[:5],  # (5,)
-            "gripper": state[5:6],  # (1,)
+        model_obs = {
+            "video": {k: obs[k] for k in self.camera_keys},
+            "state": {
+                "single_arm": state[:5],  # 5 joints
+                "gripper": state[5:6],    # 1 gripper
+            },
+            "language": {"annotation.human.task_description": obs["lang"]}
         }
+        # Add (B=1, T=1)
+        return self.recursive_add_extra_dim(self.recursive_add_extra_dim(model_obs))
 
-        # (3) Language
-        model_obs["language"] = {"annotation.human.task_description": obs["lang"]}
-
-        # (4) Add (B=1, T=1) dims
-        model_obs = recursive_add_extra_dim(model_obs)
-        model_obs = recursive_add_extra_dim(model_obs)
-        return model_obs
-
-    # -------------------------------------------------------------------------
-    # Model Action Chunk → Robot Motor Commands
-    # -------------------------------------------------------------------------
-    def decode_action_chunk(self, chunk: Dict, t: int) -> Dict[str, float]:
-        """
-        chunk["single_arm"]: (B, T, 5)
-        chunk["gripper"]:    (B, T, 1)
-
-        Convert to:
-            {
-                "shoulder_pan.pos": val,
-                ...
-            }
-        for timestep t.
-        """
-        single_arm = chunk["single_arm"][0][t]  # (5,)
-        gripper = chunk["gripper"][0][t]  # (1,)
-
-        full = np.concatenate([single_arm, gripper], axis=0)  # (6,)
-
-        return {joint_name: float(full[i]) for i, joint_name in enumerate(self.robot_state_keys)}
-
-    def get_action(self, obs: Dict) -> List[Dict[str, float]]:
-        """
-        Returns a list of robot motor commands (one per model timestep).
-        """
+    def get_action_chunk(self, obs: Dict) -> List[Dict[str, float]]:
+        """Queries the server and returns a list of 16 action steps."""
         model_input = self.obs_to_policy_inputs(obs)
-        action_chunk, info = self.policy.get_action(model_input)
-
-        # Determine horizon
-        any_key = next(iter(action_chunk.keys()))
-        horizon = action_chunk[any_key].shape[1]  # (B, T, D) → T
-
-        return [self.decode_action_chunk(action_chunk, t) for t in range(horizon)]
+        action_chunk, _ = self.policy.get_action(model_input)
+        
+        # Flatten the (B, T, D) results into a list of robot commands
+        horizon = action_chunk["single_arm"].shape[1]
+        decoded_chunk = []
+        for t in range(horizon):
+            arm = action_chunk["single_arm"][0][t]
+            grip = action_chunk["gripper"][0][t]
+            full = np.concatenate([arm, grip])
+            decoded_chunk.append({
+                joint: float(full[i]) for i, joint in enumerate(self.robot_state_keys)
+            })
+        return decoded_chunk
 
 
 # =============================================================================
-# Evaluation Config
+# 2. Async Policy Handler (The Background "Brain")
 # =============================================================================
 
+class AsyncPolicyHandler:
+    """Runs model inference in a background thread to prevent robot stutter."""
+    def __init__(self, adapter: So100Adapter, robot):
+        self.adapter = adapter
+        self.robot = robot
+        self.latest_chunk = None
+        self.chunk_id = 0
+        self.lock = threading.Lock()
+        self.running = True
+        self.lang = ""
+        
+        self.thread = threading.Thread(target=self._inference_loop, daemon=True)
+        self.thread.start()
+
+    def _inference_loop(self):
+        while self.running:
+            try:
+                # 1. Capture current observation
+                obs = self.robot.get_observation()
+                obs["lang"] = self.lang
+                
+                # 2. Inference (This part is slow, but runs in background)
+                new_actions = self.adapter.get_action_chunk(obs)
+                
+                # 3. Update the shared buffer
+                with self.lock:
+                    self.latest_chunk = new_actions
+                    self.chunk_id += 1 # Signal that a new plan is ready
+            except Exception as e:
+                logging.error(f"Inference error: {e}")
+                time.sleep(0.1)
+
+    def get_action_step(self, current_step_idx: int):
+        with self.lock:
+            if self.latest_chunk is None:
+                return None, 0
+            
+            # Ensure we don't go past the 16th step
+            idx = min(current_step_idx, len(self.latest_chunk) - 1)
+            return self.latest_chunk[idx], self.chunk_id
+
+
+# =============================================================================
+# 3. Main Evaluation Script
+# =============================================================================
 
 @dataclass
 class EvalConfig:
-    """
-    Command-line configuration for real-robot policy evaluation.
-    """
-
     robot: RobotConfig
     policy_host: str = "localhost"
     policy_port: int = 5555
-    action_horizon: int = 8
-    lang_instruction: str = "Grab markers and place into pen holder."
-    play_sounds: bool = False
-    timeout: int = 30
-
-
-# =============================================================================
-# Main Eval Loop
-# =============================================================================
+    lang_instruction: str = "Pick up the red cube and place it in the center."
+    hz: int = 20  # Matches your Isaac Lab Decimation 6
 
 
 @draccus.wrap()
 def eval(cfg: EvalConfig):
-    """
-    Main entry point for real-robot policy evaluation.
-    """
     init_logging()
     logging.info(pformat(asdict(cfg)))
 
-    # -------------------------------------------------------------------------
-    # 1. Initialize Robot Hardware
-    # -------------------------------------------------------------------------
+    # Connect to Robot
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
+    log_say("Robot Connected", False)
 
-    log_say("Initializing robot", cfg.play_sounds, blocking=True)
+    # Connect to Policy Server
+    client = PolicyClient(host=cfg.policy_host, port=cfg.policy_port)
+    adapter = So100Adapter(client)
+    
+    # Start the Async Brain
+    brain = AsyncPolicyHandler(adapter, robot)
+    brain.lang = cfg.lang_instruction
 
-    # -------------------------------------------------------------------------
-    # 2. Initialize Policy Wrapper + Client
-    # -------------------------------------------------------------------------
-    policy_client = PolicyClient(host=cfg.policy_host, port=cfg.policy_port)
-    policy = So100Adapter(policy_client)
+    print(f"\n--- Starting 20Hz Control Loop ---")
+    print(f"Instruction: {cfg.lang_instruction}")
+    
+    # Tracking variables
+    current_step_in_chunk = 0
+    last_processed_chunk_id = -1
+    target_dt = 1.0 / cfg.hz
 
-    log_say(
-        f'Policy ready with instruction: "{cfg.lang_instruction}"',
-        cfg.play_sounds,
-        blocking=True,
-    )
+    try:
+        while True:
+            loop_start = time.perf_counter()
 
-    # -------------------------------------------------------------------------
-    # 3. Main real-time control loop
-    # -------------------------------------------------------------------------
-    while True:
-        obs = robot.get_observation()
-        obs["lang"] = cfg.lang_instruction  # insert language
+            # 1. Pull the most recent action step from the background brain
+            action_dict, chunk_id = brain.get_action_step(current_step_in_chunk)
 
-        # obs = {
-        #     "front": np.zeros((480, 640, 3), dtype=np.uint8),
-        #     "wrist": np.zeros((480, 640, 3), dtype=np.uint8),
-        #     "shoulder_pan.pos": 0.0,
-        #     "shoulder_lift.pos": 0.0,
-        #     "elbow_flex.pos": 0.0,
-        #     "wrist_flex.pos": 0.0,
-        #     "wrist_roll.pos": 0.0,
-        #     "gripper.pos": 0.0,
-        #     "lang": cfg.lang_instruction,
-        # }
+            if action_dict:
+                # If the brain just finished a NEW inference, reset our step counter
+                # to 0 to use the freshest possible trajectory immediately.
+                if chunk_id != last_processed_chunk_id:
+                    current_step_in_chunk = 0
+                    last_processed_chunk_id = chunk_id
+                    action_dict, _ = brain.get_action_step(current_step_in_chunk)
 
-        actions = policy.get_action(obs)
+                # 2. Execute Action
+                robot.send_action(action_dict)
+                current_step_in_chunk += 1
+            else:
+                print("Waiting for model warmup...", end="\r")
 
-        for i, action_dict in enumerate(actions[: cfg.action_horizon]):
-            tic = time.time()
-            print(f"action[{i}]: {action_dict}")
-            # action_dict = {
-            #     "shoulder_pan.pos":    5.038022994995117,
-            #     "shoulder_lift.pos":  17.09104347229004,
-            #     "elbow_flex.pos":    -18.519847869873047,
-            #     "wrist_flex.pos":     86.86847686767578,
-            #     "wrist_roll.pos":      1.0669738054275513,
-            #     "gripper.pos":        36.83877944946289,
-            # }
-            robot.send_action(action_dict)
-            toc = time.time()
-            if toc - tic < 1.0 / 20:
-                time.sleep(1.0 / 20 - (toc - tic))
+            # 3. Precise Timing (Throttles to 20Hz)
+            elapsed = time.perf_counter() - loop_start
+            if elapsed < target_dt:
+                time.sleep(target_dt - elapsed)
+            
+            # Print status periodically
+            if current_step_in_chunk % 20 == 0:
+                actual_hz = 1.0 / (time.perf_counter() - loop_start)
+                logging.info(f"Step {current_step_in_chunk}/16 | Freq: {actual_hz:.1f}Hz")
+
+    except KeyboardInterrupt:
+        logging.info("Stopping...")
+    finally:
+        brain.running = False
+        robot.disconnect()
 
 
 if __name__ == "__main__":
