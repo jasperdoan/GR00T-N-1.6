@@ -38,11 +38,12 @@ from lerobot.robots import (  # noqa: F401
     # so100_follower,
     # so101_follower,
 )
-# from lerobot.robots import koch_follower  # noqa: F401
-# from lerobot.robots import so_follower as so100_follower  # noqa: F401
-# from lerobot.robots import so_follower as so101_follower  # noqa: F401
+from lerobot.robots import koch_follower  # noqa: F401
+from lerobot.robots import so_follower as so100_follower  # noqa: F401
+from lerobot.robots import so_follower as so101_follower  # noqa: F401
 from lerobot.utils.utils import init_logging, log_say
 import numpy as np
+import cv2
 
 
 def recursive_add_extra_dim(obs: Dict) -> Dict:
@@ -92,6 +93,47 @@ class So100Adapter:
         ]
 
         self.camera_keys = ["front", "wrist"]
+        self.target_size = 256
+
+
+    # -------------------------------------------------------------------------
+    # Helper
+    # -------------------------------------------------------------------------
+    def center_crop_and_resize(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Robustly resizes and crops any image to 256x256.
+        Works for landscape, portrait, or square inputs.
+        """
+        h, w = frame.shape[:2]
+        
+        # 1. Determine the scale factor based on the shorter side
+        if w < h:
+            # Portrait: scale based on width
+            scale = self.target_size / w
+            new_w = self.target_size
+            new_h = int(h * scale)
+        else:
+            # Landscape or Square: scale based on height
+            scale = self.target_size / h
+            new_h = self.target_size
+            new_w = int(w * scale)
+        
+        # 2. Resize maintaining aspect ratio
+        # cv2.resize takes (width, height)
+        resized_img = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+        # 3. Center crop the longer side
+        # Calculate how much to cut off from the top/bottom or left/right
+        start_y = (new_h - self.target_size) // 2
+        start_x = (new_w - self.target_size) // 2
+        
+        cropped_img = resized_img[
+            start_y : start_y + self.target_size, 
+            start_x : start_x + self.target_size
+        ]
+        
+        return cropped_img
+    
 
     # -------------------------------------------------------------------------
     # Observation → Model Input
@@ -103,7 +145,14 @@ class So100Adapter:
         model_obs = {}
 
         # (1) Cameras
-        model_obs["video"] = {k: obs[k] for k in self.camera_keys}
+        model_obs["video"] = {}
+        for k in self.camera_keys:
+            if k in obs:
+                model_obs["video"][k] = self.center_crop_and_resize(obs[k])
+            else:
+                # Fallback for debugging if a camera is missing
+                logging.warning(f"Camera key {k} not found in observation!")
+                model_obs["video"][k] = np.zeros((256, 256, 3), dtype=np.uint8)
 
         # (2) Arm + gripper state
         state = np.array([obs[k] for k in self.robot_state_keys], dtype=np.float32)
