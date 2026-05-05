@@ -212,33 +212,39 @@ def eval(cfg: EvalConfig):
     # -------------------------------------------------------------------------
     # 3. Main real-time control loop
     # -------------------------------------------------------------------------
-    action_queue = []
-    MAX_STEPS_TO_EXECUTE = 6 # Out of 16 steps, execute 6 then ask for more
-
     while True:
         obs = robot.get_observation()
-        obs["lang"] = cfg.lang_instruction
+        obs["lang"] = cfg.lang_instruction  # insert language
 
-        # 1. Ask the server for actions (The "Brain" works)
-        # This takes, say, 80ms
-        actions = policy.get_action(obs) 
+        # obs = {
+        #     "front": np.zeros((480, 640, 3), dtype=np.uint8),
+        #     "wrist": np.zeros((480, 640, 3), dtype=np.uint8),
+        #     "shoulder_pan.pos": 0.0,
+        #     "shoulder_lift.pos": 0.0,
+        #     "elbow_flex.pos": 0.0,
+        #     "wrist_flex.pos": 0.0,
+        #     "wrist_roll.pos": 0.0,
+        #     "gripper.pos": 0.0,
+        #     "lang": cfg.lang_instruction,
+        # }
 
-        # 2. Execute a small "chunk" of the actions
-        # This covers 6 steps * 50ms = 300ms of motion
-        for i in range(MAX_STEPS_TO_EXECUTE):
-            action_dict = actions[i]
-            
+        actions = policy.get_action(obs)
+
+        for i, action_dict in enumerate(actions[: cfg.action_horizon]):
             tic = time.time()
+            print(f"action[{i}]: {action_dict}")
+            # action_dict = {
+            #     "shoulder_pan.pos":    5.038022994995117,
+            #     "shoulder_lift.pos":  17.09104347229004,
+            #     "elbow_flex.pos":    -18.519847869873047,
+            #     "wrist_flex.pos":     86.86847686767578,
+            #     "wrist_roll.pos":      1.0669738054275513,
+            #     "gripper.pos":        36.83877944946289,
+            # }
             robot.send_action(action_dict)
-            
-            # Maintain your 20Hz (50ms)
             toc = time.time()
-            if toc - tic < 0.05:
-                time.sleep(0.05 - (toc - tic))
-
-        # Because 300ms (Execution) is longer than 80ms (Inference),
-        # the next loop starts BEFORE the robot stops moving.
-        # NO STUTTER.
+            if toc - tic < 1.0 / 20:
+                time.sleep(1.0 / 20 - (toc - tic))
 
 
 if __name__ == "__main__":
