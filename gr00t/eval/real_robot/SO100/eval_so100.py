@@ -10,7 +10,9 @@ import numpy as np
 from gr00t.policy.server_client import PolicyClient
 from lerobot.robots import RobotConfig, make_robot_from_config
 from lerobot.utils.utils import init_logging, log_say
-
+from lerobot.robots import koch_follower  # noqa: F401
+from lerobot.robots import so_follower as so100_follower  # noqa: F401
+from lerobot.robots import so_follower as so101_follower  # noqa: F401
 
 # =============================================================================
 # 1. So100 Adapter (Data Formatting)
