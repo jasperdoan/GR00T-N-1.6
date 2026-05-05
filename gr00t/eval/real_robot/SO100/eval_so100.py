@@ -43,7 +43,6 @@ from lerobot.robots import so_follower as so100_follower  # noqa: F401
 from lerobot.robots import so_follower as so101_follower  # noqa: F401
 from lerobot.utils.utils import init_logging, log_say
 import numpy as np
-import cv2
 
 
 def recursive_add_extra_dim(obs: Dict) -> Dict:
@@ -93,47 +92,6 @@ class So100Adapter:
         ]
 
         self.camera_keys = ["front", "wrist"]
-        self.target_size = 256
-
-
-    # -------------------------------------------------------------------------
-    # Helper
-    # -------------------------------------------------------------------------
-    def center_crop_and_resize(self, frame: np.ndarray) -> np.ndarray:
-        """
-        Robustly resizes and crops any image to 256x256.
-        Works for landscape, portrait, or square inputs.
-        """
-        h, w = frame.shape[:2]
-        
-        # 1. Determine the scale factor based on the shorter side
-        if w < h:
-            # Portrait: scale based on width
-            scale = self.target_size / w
-            new_w = self.target_size
-            new_h = int(h * scale)
-        else:
-            # Landscape or Square: scale based on height
-            scale = self.target_size / h
-            new_h = self.target_size
-            new_w = int(w * scale)
-        
-        # 2. Resize maintaining aspect ratio
-        # cv2.resize takes (width, height)
-        resized_img = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        
-        # 3. Center crop the longer side
-        # Calculate how much to cut off from the top/bottom or left/right
-        start_y = (new_h - self.target_size) // 2
-        start_x = (new_w - self.target_size) // 2
-        
-        cropped_img = resized_img[
-            start_y : start_y + self.target_size, 
-            start_x : start_x + self.target_size
-        ]
-        
-        return cropped_img
-    
 
     # -------------------------------------------------------------------------
     # Observation → Model Input
@@ -145,14 +103,7 @@ class So100Adapter:
         model_obs = {}
 
         # (1) Cameras
-        model_obs["video"] = {}
-        for k in self.camera_keys:
-            if k in obs:
-                model_obs["video"][k] = self.center_crop_and_resize(obs[k])
-            else:
-                # Fallback for debugging if a camera is missing
-                logging.warning(f"Camera key {k} not found in observation!")
-                model_obs["video"][k] = np.zeros((256, 256, 3), dtype=np.uint8)
+        model_obs["video"] = {k: obs[k] for k in self.camera_keys}
 
         # (2) Arm + gripper state
         state = np.array([obs[k] for k in self.robot_state_keys], dtype=np.float32)
@@ -261,39 +212,33 @@ def eval(cfg: EvalConfig):
     # -------------------------------------------------------------------------
     # 3. Main real-time control loop
     # -------------------------------------------------------------------------
+    action_queue = []
+    MAX_STEPS_TO_EXECUTE = 6 # Out of 16 steps, execute 6 then ask for more
+
     while True:
         obs = robot.get_observation()
-        obs["lang"] = cfg.lang_instruction  # insert language
+        obs["lang"] = cfg.lang_instruction
 
-        # obs = {
-        #     "front": np.zeros((480, 640, 3), dtype=np.uint8),
-        #     "wrist": np.zeros((480, 640, 3), dtype=np.uint8),
-        #     "shoulder_pan.pos": 0.0,
-        #     "shoulder_lift.pos": 0.0,
-        #     "elbow_flex.pos": 0.0,
-        #     "wrist_flex.pos": 0.0,
-        #     "wrist_roll.pos": 0.0,
-        #     "gripper.pos": 0.0,
-        #     "lang": cfg.lang_instruction,
-        # }
+        # 1. Ask the server for actions (The "Brain" works)
+        # This takes, say, 80ms
+        actions = policy.get_action(obs) 
 
-        actions = policy.get_action(obs)
-
-        for i, action_dict in enumerate(actions[: cfg.action_horizon]):
+        # 2. Execute a small "chunk" of the actions
+        # This covers 6 steps * 50ms = 300ms of motion
+        for i in range(MAX_STEPS_TO_EXECUTE):
+            action_dict = actions[i]
+            
             tic = time.time()
-            print(f"action[{i}]: {action_dict}")
-            # action_dict = {
-            #     "shoulder_pan.pos":    5.038022994995117,
-            #     "shoulder_lift.pos":  17.09104347229004,
-            #     "elbow_flex.pos":    -18.519847869873047,
-            #     "wrist_flex.pos":     86.86847686767578,
-            #     "wrist_roll.pos":      1.0669738054275513,
-            #     "gripper.pos":        36.83877944946289,
-            # }
             robot.send_action(action_dict)
+            
+            # Maintain your 20Hz (50ms)
             toc = time.time()
-            if toc - tic < 1.0 / 30:
-                time.sleep(1.0 / 30 - (toc - tic))
+            if toc - tic < 0.05:
+                time.sleep(0.05 - (toc - tic))
+
+        # Because 300ms (Execution) is longer than 80ms (Inference),
+        # the next loop starts BEFORE the robot stops moving.
+        # NO STUTTER.
 
 
 if __name__ == "__main__":
