@@ -243,8 +243,8 @@ def eval(cfg: EvalConfig):
             # }
             robot.send_action(action_dict)
             toc = time.time()
-            if toc - tic < 1.0 / 20:
-                time.sleep(1.0 / 20 - (toc - tic))
+            if toc - tic < 1.0 / 30:
+                time.sleep(1.0 / 30 - (toc - tic))
 
 
 if __name__ == "__main__":
