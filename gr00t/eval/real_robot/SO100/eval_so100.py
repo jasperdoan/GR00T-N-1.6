@@ -43,6 +43,7 @@ from lerobot.robots import so_follower as so100_follower  # noqa: F401
 from lerobot.robots import so_follower as so101_follower  # noqa: F401
 from lerobot.utils.utils import init_logging, log_say
 import numpy as np
+import cv2
 
 
 def recursive_add_extra_dim(obs: Dict) -> Dict:
@@ -209,12 +210,35 @@ def eval(cfg: EvalConfig):
         blocking=True,
     )
 
+    w, h = 640, 480
+    focal_length = 18.2
+    horizontal_aperture = 20.955
+    fx = (w / horizontal_aperture) * focal_length
+    fy = fx
+    cx, cy = w / 2.0, h / 2.0
+
+    K = np.array([
+        [fx,  0, cx],
+        [ 0, fy, cy],
+        [ 0,  0,  1]
+    ], dtype=np.float32)
+
+    D = np.array([
+        -0.42817982447014624, 
+         0.26363653757057887, 
+         0.005161264803428241, 
+         0.003249745592192356, 
+        -0.10578308734662685
+    ], dtype=np.float32)
+
     # -------------------------------------------------------------------------
     # 3. Main real-time control loop
     # -------------------------------------------------------------------------
     while True:
         obs = robot.get_observation()
         obs["lang"] = cfg.lang_instruction  # insert language
+        if "wrist" in obs:
+            obs["wrist"] = cv2.undistort(obs["wrist"], K, D)
 
         # obs = {
         #     "front": np.zeros((480, 640, 3), dtype=np.uint8),
