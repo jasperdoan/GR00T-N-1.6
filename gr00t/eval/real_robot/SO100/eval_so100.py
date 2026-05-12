@@ -63,7 +63,7 @@ HOME_ACTION = {
     "shoulder_lift.pos":  -60.0,
     "elbow_flex.pos":      60.0,
     "wrist_flex.pos":      60.0,
-    "wrist_roll.pos":      -90.0,
+    "wrist_roll.pos":      90.0,
     "gripper.pos":         40.0,
 }
 
