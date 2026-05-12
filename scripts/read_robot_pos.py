@@ -1,42 +1,49 @@
 """
-SO100 Robot Calibration Tool: Get Joint Positions
-
-Usage:
-    PYTHONPATH=. python gr00t/eval/real_robot/SO100/get_pos.py \
-      --robot.type=so101_follower \
-      --robot.port=/dev/ttyACM0 \
-      --robot.id=follower_arm
+SO100 Position Reader (Based on eval_so100 logic)
+Use this to calibrate your A and B waypoints.
 """
 
-from dataclasses import dataclass
-import time
-import draccus
+from dataclasses import asdict, dataclass
 import logging
+import time
+from typing import Dict
+
+import draccus
+import numpy as np
+
+# Same imports as your eval script to ensure hardware compatibility
+from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.robots import (
+    Robot,
     RobotConfig,
     make_robot_from_config,
 )
 from lerobot.utils.utils import init_logging
 
 @dataclass
-class GetPosConfig:
+class EvalConfig:
+    """
+    Mirroring your exact EvalConfig so the CLI arguments match.
+    """
     robot: RobotConfig
-    # We include these just so the CLI arguments from eval_so100.py don't cause errors
     policy_host: str = "localhost"
     policy_port: int = 5555
+    action_horizon: int = 8
     lang_instruction: str = ""
+    play_sounds: bool = False
+    timeout: int = 30
 
 @draccus.wrap()
-def main(cfg: GetPosConfig):
+def main(cfg: EvalConfig):
     init_logging()
     
-    # 1. Initialize Robot Hardware
-    print(f"Connecting to robot on {cfg.robot.port}...")
+    # 1. Initialize Robot Hardware (Identical to eval_so100)
+    print(f"\nConnecting to robot on {cfg.robot.port}...")
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
     
-    # The joint names we care about for calibration
-    joint_keys = [
+    # These are the keys used by your adapter
+    robot_state_keys = [
         "shoulder_pan.pos",
         "shoulder_lift.pos",
         "elbow_flex.pos",
@@ -45,32 +52,32 @@ def main(cfg: GetPosConfig):
         "gripper.pos",
     ]
 
-    print("\n" + "="*50)
-    print(" ROBOT CALIBRATION MODE")
-    print(" Move the arm by hand. Press Ctrl+C to stop.")
-    print("="*50 + "\n")
+    print("\n" + "="*60)
+    print(" READING ROBOT POSITIONS")
+    print(" Move the arm to your desired A or B points.")
+    print(" Press Ctrl+C to exit.")
+    print("="*60 + "\n")
 
     try:
         while True:
-            # Get latest observation from servos
+            # Read from servos
             obs = robot.get_observation()
             
-            # Print in a Python-dictionary-friendly format for easy copy-pasting
-            print("current_pos = {")
-            for k in joint_keys:
+            # Print in a format ready for code insertion
+            print("waypoint = {")
+            for k in robot_state_keys:
                 val = obs.get(k, 0.0)
                 print(f"    \"{k}\": {val:8.3f},")
             print("}")
             
-            # Add a small separator and move cursor back up (terminal trick)
-            print("\033[9A", end="") # Move up 9 lines
+            # Terminal trick: Move cursor back up 8 lines to refresh the view
+            print("\033[8A", end="")
             
             time.sleep(0.1)
             
     except KeyboardInterrupt:
-        print("\n\nExiting calibration mode.")
+        print("\n\nStopped reading positions.")
     finally:
-        # Properly disconnect
         robot.disconnect()
 
 if __name__ == "__main__":
