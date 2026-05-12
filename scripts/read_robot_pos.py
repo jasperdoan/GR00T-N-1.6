@@ -5,20 +5,26 @@ Use this to calibrate your A and B waypoints.
 
 from dataclasses import asdict, dataclass
 import logging
+from pprint import pformat
 import time
-from typing import Dict
+from typing import Any, Dict, List
 
+import cv2
 import draccus
 import numpy as np
 
-# Same imports as your eval script to ensure hardware compatibility
+from gr00t.policy.server_client import PolicyClient
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
-from lerobot.robots import (
+from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
     make_robot_from_config,
 )
-from lerobot.utils.utils import init_logging
+from lerobot.robots import koch_follower  # noqa: F401
+from lerobot.robots import so_follower as so100_follower  # noqa: F401
+from lerobot.robots import so_follower as so101_follower  # noqa: F401
+from lerobot.utils.utils import init_logging, log_say
+
 
 @dataclass
 class EvalConfig:
