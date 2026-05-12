@@ -33,7 +33,7 @@ python3 -m gr00t.experiment.launch_finetune \
     --embodiment_tag NEW_EMBODIMENT \
     --num_gpus 1 \
     --output_dir ~/Desktop/models/so100_finetune \
-    --save_steps 5000 \
+    --save_steps 2500 \
     --save_total_limit 1 \
     --max_steps 10000 \
     --random_rotation_angle 5 \
@@ -42,7 +42,6 @@ python3 -m gr00t.experiment.launch_finetune \
     --weight_decay 1e-3 \
     --learning_rate 5e-5 \
     --global_batch_size 32 \
-    --gradient_accumulation_steps 8 \
     --color_jitter_params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
     --episode_sampling_rate 1.0 \
     --dataloader_num_workers 4
