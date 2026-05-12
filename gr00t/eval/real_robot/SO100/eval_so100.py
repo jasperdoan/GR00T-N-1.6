@@ -63,7 +63,7 @@ HOME_ACTION = {
     "shoulder_lift.pos":  -60.0,
     "elbow_flex.pos":      60.0,
     "wrist_flex.pos":      60.0,
-    "wrist_roll.pos":      0.0,
+    "wrist_roll.pos":      -90.0,
     "gripper.pos":         40.0,
 }
 
@@ -260,8 +260,6 @@ def eval(cfg: EvalConfig):
             print(f"\n🎉 [SUCCESS] {target_color.upper()} cube securely detected in zone!")
             print("🎉 [SUCCESS] Arm has cleared the area. Task Complete.")
             break
-            
-        # ... [Rest of inference loop remains the same]
 
         # --- RUN INFERENCE ---
         actions = policy.get_action(obs)
