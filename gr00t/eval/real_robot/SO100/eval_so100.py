@@ -82,13 +82,53 @@ def recursive_add_extra_dim(obs: Dict) -> Dict:
     return obs
 
 
-def move_to_home(robot: Robot):
-    """Sends the robot to the predefined home position."""
-    print(">>> Moving to HOME position...")
-    # Send command repeatedly for ~1.5 seconds to ensure smooth travel
-    for _ in range(45):
-        robot.send_action(HOME_ACTION)
-        time.sleep(1.0 / 30)
+def move_to_home(robot: Robot, duration: float = 2.0):
+    """
+    Smoothly interpolates the robot from its current position to the HOME position 
+    using an ease-in/ease-out curve.
+    """
+    print(f">>> Smoothly moving to HOME position over {duration} seconds...")
+    
+    # 1. Read the current actual position of the robot
+    obs = robot.get_observation()
+    
+    # 2. Extract current joint values safely
+    current_state = {}
+    for joint_name in HOME_ACTION.keys():
+        # Fallback to HOME_ACTION if a key is missing to prevent crashes, 
+        # though standard LeRobot configs will always have these keys.
+        current_state[joint_name] = obs.get(joint_name, HOME_ACTION[joint_name])
+        
+    # 3. Setup interpolation parameters
+    hz = 30
+    steps = int(duration * hz)
+    
+    # 4. Interpolate over time
+    for step in range(steps):
+        tic = time.time()
+        
+        # Linear progress (t goes from 0.0 to 1.0)
+        t = step / max(1, steps - 1)
+        
+        # Smoothstep curve formula (Ease-in, Ease-out)
+        # This makes alpha start slow, speed up in the middle, and slow down at the end
+        alpha = t * t * (3.0 - 2.0 * t)
+        
+        # Calculate the interpolated action dictionary
+        interpolated_action = {}
+        for joint_name in HOME_ACTION.keys():
+            start_val = current_state[joint_name]
+            end_val = HOME_ACTION[joint_name]
+            # Standard Lerp formula based on our smooth alpha
+            interpolated_action[joint_name] = start_val + (end_val - start_val) * alpha
+            
+        # Send the intermediate command
+        robot.send_action(interpolated_action)
+        
+        # Maintain the loop frequency
+        toc = time.time()
+        if toc - tic < 1.0 / hz:
+            time.sleep(1.0 / hz - (toc - tic))
 
 
 def check_task_success(img_np, baseline_np, zone, color_name) -> bool:
