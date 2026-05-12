@@ -1,38 +1,41 @@
 """
-SO100 Waypoint Calibration Tool
-Usage: python read_robot_pos.py --port /dev/ttyACM0
+SO100 Robot Calibration Tool: Get Joint Positions
+
+Usage:
+    PYTHONPATH=. python gr00t/eval/real_robot/SO100/get_pos.py \
+      --robot.type=so101_follower \
+      --robot.port=/dev/ttyACM0 \
+      --robot.id=follower_arm
 """
 
+from dataclasses import dataclass
 import time
 import draccus
-from dataclasses import dataclass
-from lerobot.robots import make_robot_from_config, RobotConfig
+import logging
+from lerobot.robots import (
+    RobotConfig,
+    make_robot_from_config,
+)
+from lerobot.utils.utils import init_logging
 
 @dataclass
-class CalibrationConfig:
-    # Match your hardware settings
-    port: str = "/dev/ttyACM0"
-    robot_type: str = "so101_follower"  # or so_follower
-    robot_id: str = "follower_arm"
+class GetPosConfig:
+    robot: RobotConfig
+    # We include these just so the CLI arguments from eval_so100.py don't cause errors
+    policy_host: str = "localhost"
+    policy_port: int = 5555
+    lang_instruction: str = ""
 
-def main():
-    cfg = CalibrationConfig()
+@draccus.wrap()
+def main(cfg: GetPosConfig):
+    init_logging()
     
-    # 1. Create the LeRobot config manually for the hardware
-    # This mirrors what you pass in your CLI command
-    robot_cfg = RobotConfig(
-        type=cfg.robot_type,
-        port=cfg.port,
-        id=cfg.robot_id,
-        # We don't need cameras for position calibration
-        cameras={} 
-    )
-
-    print(f"Connecting to {cfg.robot_type} on {cfg.port}...")
-    robot = make_robot_from_config(robot_cfg)
+    # 1. Initialize Robot Hardware
+    print(f"Connecting to robot on {cfg.robot.port}...")
+    robot = make_robot_from_config(cfg.robot)
     robot.connect()
-
-    # The joint names we care about for the SO100
+    
+    # The joint names we care about for calibration
     joint_keys = [
         "shoulder_pan.pos",
         "shoulder_lift.pos",
@@ -43,31 +46,32 @@ def main():
     ]
 
     print("\n" + "="*50)
-    print(" ROBOT POSITION CALIBRATOR")
-    print(" Move the arm manually and copy the values below.")
-    print(" Press Ctrl+C to exit.")
+    print(" ROBOT CALIBRATION MODE")
+    print(" Move the arm by hand. Press Ctrl+C to stop.")
     print("="*50 + "\n")
 
     try:
         while True:
-            # 2. Get current state from servos
+            # Get latest observation from servos
             obs = robot.get_observation()
             
-            # 3. Print in a dictionary format for easy copy-pasting
-            print("action_dict = {")
+            # Print in a Python-dictionary-friendly format for easy copy-pasting
+            print("current_pos = {")
             for k in joint_keys:
                 val = obs.get(k, 0.0)
-                print(f'    "{k}": {val:8.3f},')
-            print("}\n")
+                print(f"    \"{k}\": {val:8.3f},")
+            print("}")
             
-            time.sleep(1.0) # Refresh every second
+            # Add a small separator and move cursor back up (terminal trick)
+            print("\033[9A", end="") # Move up 9 lines
+            
+            time.sleep(0.1)
             
     except KeyboardInterrupt:
-        print("\nCalibration finished. Closing connection.")
+        print("\n\nExiting calibration mode.")
     finally:
-        # Important: Don't just kill the script, close the port
-        # though LeRobot handles this gracefully, it's good practice.
-        pass
+        # Properly disconnect
+        robot.disconnect()
 
 if __name__ == "__main__":
     main()
