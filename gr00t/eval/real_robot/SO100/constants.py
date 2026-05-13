@@ -53,7 +53,7 @@ WRIST_COLOR_RANGES = {
     ],
 }
 
-WRIST_MIN_COLOR_PX   = 40      # Min pixels matching target color inside ROI
+WRIST_MIN_COLOR_PX   = 80      # Min pixels matching target color inside ROI
 WRIST_STABILITY_THR  = 6.0     # Diff threshold; any pixel changing > 6 is "moving"
 WRIST_CONFIRM_FRAMES = 8      # Number of consecutive true frames required
 VLA_GRASP_MIN_TIME   = 5.0     # Number of seconds the VLA runs before checking for grasps

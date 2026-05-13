@@ -45,11 +45,32 @@ def _clean_mask(mask: np.ndarray, kernel_size: int = 5) -> np.ndarray:
     return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
 
-def _color_pixel_count(image_bgr: np.ndarray, color_name: str, color_ranges: Dict) -> int:
-    """Return the total number of pixels matching color_name in image_bgr."""
-    hsv  = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+def _color_pixel_count(image_arr: np.ndarray, color_name: str, color_ranges: Dict, debug_save: bool = False) -> int:
+    """Return the total number of pixels matching color_name in image_arr."""
+    # 1. Safeguard: if LeRobot gave us floats [0.0 - 1.0], convert to standard pixels [0 - 255]
+    if image_arr.dtype != np.uint8:
+        img_uint8 = (image_arr * 255).clip(0, 255).astype(np.uint8)
+    else:
+        img_uint8 = image_arr.copy()
+
+    # 2. Convert to HSV. (If your debug image looks like Red and Blue are swapped, 
+    # we will need to change this to cv2.COLOR_RGB2HSV)
+    hsv = cv2.cvtColor(img_uint8, cv2.COLOR_BGR2HSV)
+    
+    # 3. Get raw matching pixels
     mask = _build_color_mask(hsv, color_name, color_ranges)
-    mask = _clean_mask(mask)
+    
+    # 4. Less aggressive cleanup: reduced from 5x5 to 3x3 so we don't accidentally erase the cube
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    
+    # -------------------------------------------------------------------------
+    # DEBUG: Save exactly what the algorithm is looking at!
+    # -------------------------------------------------------------------------
+    if debug_save:
+        cv2.imwrite("DEBUG_wrist_crop_color.jpg", img_uint8)
+        cv2.imwrite("DEBUG_wrist_mask.jpg", mask)
+        
     return int(np.sum(mask > 0))
 
 
@@ -149,35 +170,26 @@ class GraspDetector:
         is_stable = False
         if self.prev_gray is not None:
             diff = cv2.absdiff(curr_gray, self.prev_gray)
-            
-            # Count pixels that have changed beyond the threshold
             changed_pixels = np.sum(diff > WRIST_STABILITY_THR)
             total_pixels = curr_gray.size
-            
-            # If 25% or less of the pixels are moving, we consider it 75% still
             if (changed_pixels / total_pixels) <= 0.25:
                 is_stable = True
-
         self.prev_gray = curr_gray
 
         # --- Signal B: Color Presence ---
-        color_px = _color_pixel_count(roi_bgr, color_name, WRIST_COLOR_RANGES)
-        print(f'Color pixels detected: {color_px}')
+        # NOTE: We pass debug_save=True here!
+        color_px = _color_pixel_count(roi_bgr, color_name, WRIST_COLOR_RANGES, debug_save=True)
         has_color = color_px >= WRIST_MIN_COLOR_PX
 
         # --- Signal C: Gripper Loose Check ---
         gripper_pos = obs.get("gripper.pos", GRIPPER_OPEN_POS)
-        # Verify the arm isn't just flying through empty air wide open
         is_gripping = float(gripper_pos) < (GRIPPER_OPEN_POS - 2.0)
 
-        # Append overall success for this frame
         frame_success = is_stable and has_color and is_gripping
 
-        print(f'Grasp detection frame: {frame_success} - is_stable: {is_stable}, has_color: {has_color}, is_gripping: {is_gripping}')
+        print(f'Grasp detection frame: {frame_success} - is_stable: {is_stable}, has_color: {has_color} (px: {color_px}), is_gripping: {is_gripping}')
 
         self.history.append(frame_success)
-
-        # Only return true if the queue is full and ALL 16 frames were successful
         return len(self.history) == self.history.maxlen and all(self.history)
 
     def _update_prev_frame(self, obs: Dict[str, Any]):
