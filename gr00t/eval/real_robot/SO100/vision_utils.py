@@ -165,13 +165,13 @@ class GraspDetector:
         roi_bgr = wrist_img[y:y+h, x:x+w]
         curr_gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
 
-        # --- Signal A: Stability check (75% still) ---
+        # --- Signal A: Stability check (% still) ---
         is_stable = False
         if self.prev_gray is not None:
             diff = cv2.absdiff(curr_gray, self.prev_gray)
             changed_pixels = np.sum(diff > WRIST_STABILITY_THR)
             total_pixels = curr_gray.size
-            if (changed_pixels / total_pixels) <= 0.25:
+            if (changed_pixels / total_pixels) <= 0.45:
                 is_stable = True
         self.prev_gray = curr_gray
 
