@@ -122,7 +122,7 @@ def eval(cfg: EvalConfig):
     # ── Phase 1: VLA — approach and grasp ────────────────────────────────────
     print("\n─── Phase 1: VLA Grasp ─────────────────────────────────────────")
     log_say(f"Searching for {color} cube.", cfg.play_sounds)
-    print(">>> Monitoring wrist camera (5-second gate initiated) ...")
+    print(">>> Monitoring wrist camera (VLA_GRASP_MIN_TIME gate initiated) ...")
 
     grasp_obs: Optional[dict] = None
     start_time = time.time()
