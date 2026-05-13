@@ -162,6 +162,7 @@ class GraspDetector:
 
         # --- Signal B: Color Presence ---
         color_px = _color_pixel_count(roi_bgr, color_name, WRIST_COLOR_RANGES)
+        print(f'Color pixels detected: {color_px}')
         has_color = color_px >= WRIST_MIN_COLOR_PX
 
         # --- Signal C: Gripper Loose Check ---

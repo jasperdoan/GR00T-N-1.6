@@ -54,7 +54,7 @@ class EvalConfig:
     robot:             RobotConfig
     policy_host:       str  = "localhost"
     policy_port:       int  = 5555
-    action_horizon:    int  = 8
+    action_horizon:    int  = 16
     lang_instruction:  str  = "Check in red cube"
     play_sounds:       bool = False
     vla_timeout:       int  = 20    # Max seconds for the VLA grasp phase
