@@ -97,9 +97,9 @@ GRIPPER_GRASP_TOL   = 1.5    # ± tolerance in degrees
 # =============================================================================
 
 LIFT_OVERRIDE = {
-    "shoulder_lift.pos": 15.3,
-    "elbow_flex.pos":    -3.4,
-    "wrist_flex.pos":    71.1,
+    "shoulder_lift.pos":  9.6,
+    "elbow_flex.pos":    -14.7,
+    "wrist_flex.pos":    89.2,
 }
 
 STORAGE_PLACE = {
