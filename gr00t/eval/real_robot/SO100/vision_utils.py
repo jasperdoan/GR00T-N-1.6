@@ -176,8 +176,7 @@ class GraspDetector:
         self.prev_gray = curr_gray
 
         # --- Signal B: Color Presence ---
-        # NOTE: We pass debug_save=True here!
-        color_px = _color_pixel_count(roi_bgr, color_name, WRIST_COLOR_RANGES, debug_save=True)
+        color_px = _color_pixel_count(roi_bgr, color_name, WRIST_COLOR_RANGES, debug_save=False)
         has_color = color_px >= WRIST_MIN_COLOR_PX
 
         # --- Signal C: Gripper Loose Check ---
