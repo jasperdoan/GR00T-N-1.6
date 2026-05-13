@@ -101,7 +101,7 @@ def move_to_lift(robot, duration: float = LERP_DURATION_LIFT) -> None:
     """Smoothly move the robot to the lift position."""
     print(f">>> Moving to LIFT over {duration:.1f}s …")
     d = {
-        "shoulder_pan.pos": 48.2,
+        "shoulder_pan.pos":  38.2,
         "shoulder_lift.pos": 15.3,
         "elbow_flex.pos":    -3.4,
         "wrist_flex.pos":    71.1,
