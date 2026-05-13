@@ -100,7 +100,12 @@ def move_to_home(robot, duration: float = LERP_DURATION_HOME) -> None:
 def move_to_lift(robot, duration: float = LERP_DURATION_LIFT) -> None:
     """Smoothly move the robot to the lift position."""
     print(f">>> Moving to LIFT over {duration:.1f}s …")
-    d = LIFT_OVERRIDE.update({"shoulder_pan.pos": 48.2})
+    d = {
+        "shoulder_pan.pos": 48.2,
+        "shoulder_lift.pos": 15.3,
+        "elbow_flex.pos":    -3.4,
+        "wrist_flex.pos":    71.1,
+    }
     lerp_to_waypoint(robot, d, duration, fixed_joints={"gripper.pos": 40.0})
 
 
