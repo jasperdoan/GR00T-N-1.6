@@ -54,7 +54,7 @@ WRIST_COLOR_RANGES = {
 }
 
 WRIST_MIN_COLOR_PX   = 5000      # Min pixels matching target color inside ROI
-WRIST_STABILITY_THR  = 6.0     # Diff threshold; any pixel changing > 6 is "moving"
+WRIST_STABILITY_THR  = 3.0     # Diff threshold; any pixel changing > X is "moving"
 WRIST_CONFIRM_FRAMES = 3      # Number of consecutive true frames required
 VLA_GRASP_MIN_TIME   = 1.0     # Number of seconds the VLA runs before checking for grasps
 
@@ -118,7 +118,7 @@ CHECKOUT_PLACE = {
     "wrist_roll.pos":    63.8,
 }
 
-PLACE_VARIATION_DEG = 3.0   # uniform random in [-X, +X] degrees per joint
+PLACE_VARIATION_DEG = 2.0   # uniform random in [-X, +X] degrees per joint
 POST_DROP_PAUSE = 0.25      # Pause duration after dropping the cube (seconds)
 
 LERP_DURATION_LIFT  = 1.0
