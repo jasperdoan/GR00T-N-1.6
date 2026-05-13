@@ -89,7 +89,7 @@ HOME_ACTION = {
 # =============================================================================
 
 GRIPPER_OPEN_POS    = 40.0   # degrees — fully open
-GRIPPER_GRASP_POS   = 16.5   # degrees — expected closed-on-cube position
+GRIPPER_GRASP_POS   = 15.0   # degrees — expected closed-on-cube position
 GRIPPER_GRASP_TOL   = 1.5    # ± tolerance in degrees
 
 # =============================================================================

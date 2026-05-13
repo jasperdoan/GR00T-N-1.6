@@ -130,7 +130,7 @@ def scripted_transport(robot, task_type: str, grasp_obs: Dict) -> None:
         place_waypoint[joint] += rng.uniform(-PLACE_VARIATION_DEG, PLACE_VARIATION_DEG)
 
     # --- Lock gripper closed throughout transport ---
-    gripper_closed = float(grasp_obs.get("gripper.pos", 16.5))
+    gripper_closed = float(grasp_obs.get("gripper.pos", 15.0))
     transport_lock = {"gripper.pos": gripper_closed}
 
     # ── Step 1: Lift up (pan and roll unchanged, gripper locked) ──────────────
