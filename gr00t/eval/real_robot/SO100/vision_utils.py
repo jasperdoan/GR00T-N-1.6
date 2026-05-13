@@ -171,6 +171,9 @@ class GraspDetector:
 
         # Append overall success for this frame
         frame_success = is_stable and has_color and is_gripping
+
+        print(f'Grasp detection frame: {frame_success} - is_stable: {is_stable}, has_color: {has_color}, is_gripping: {is_gripping}')
+
         self.history.append(frame_success)
 
         # Only return true if the queue is full and ALL 16 frames were successful
