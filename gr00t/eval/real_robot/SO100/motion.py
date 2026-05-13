@@ -88,7 +88,7 @@ def lerp_to_waypoint(
 
 
 # =============================================================================
-# Home
+# Move
 # =============================================================================
 
 def move_to_home(robot, duration: float = LERP_DURATION_HOME) -> None:
@@ -97,14 +97,14 @@ def move_to_home(robot, duration: float = LERP_DURATION_HOME) -> None:
     lerp_to_waypoint(robot, HOME_ACTION, duration)
 
 
-def move_to_lift(robot, duration: float = LERP_DURATION_LIFT) -> None:
+def move_to_ready(robot, duration: float = LERP_DURATION_LIFT) -> None:
     """Smoothly move the robot to the lift position."""
     print(f">>> Moving to LIFT over {duration:.1f}s …")
     d = {
-        "shoulder_pan.pos":  38.2,
-        "shoulder_lift.pos": 15.3,
-        "elbow_flex.pos":    -3.4,
-        "wrist_flex.pos":    71.1,
+        "shoulder_pan.pos":  36.2,
+        "shoulder_lift.pos": -21.1,
+        "elbow_flex.pos":    27.1,
+        "wrist_flex.pos":    78.4,
     }
     lerp_to_waypoint(robot, d, duration, fixed_joints={"gripper.pos": 40.0})
 
