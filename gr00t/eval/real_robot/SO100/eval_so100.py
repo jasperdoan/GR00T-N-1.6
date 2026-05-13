@@ -42,7 +42,7 @@ from lerobot.utils.utils import init_logging, log_say
 
 from adapter      import So100Adapter
 from constants    import CHECK_OUT_ZONE, STORAGE_ZONE
-from motion       import move_to_home, scripted_transport
+from motion       import move_to_home, scripted_transport, move_to_lift
 from vision_utils import GraspDetector, check_task_success
 
 # =============================================================================
@@ -114,7 +114,8 @@ def eval(cfg: EvalConfig):
 
     # ── Pre-flight: home + baseline snapshot ─────────────────────────────────
     move_to_home(robot)
-    time.sleep(0.5)   # let camera auto-exposure settle
+    time.sleep(0.1)   # let camera auto-exposure settle
+    move_to_lift(robot)
 
     print(">>> Taking baseline snapshot of workspace …")
     baseline_img = robot.get_observation()["front"]
