@@ -1,24 +1,32 @@
 """
-SO100 Real-Robot Gr00T Policy Evaluation Script (WITH AUTO-STOP VISION)
+SO100 Hybrid Modular Evaluation Script
+=======================================
 
-This script runs closed-loop policy evaluation on the SO100 / SO101 robots.
-It uses an OpenCV heuristic to detect task completion (cube placed and arm removed)
-to prevent infinite execution loops.
+Architecture
+------------
+  Phase 1 — VLA (GR00T):      Approach and grasp the target cube.
+  Phase 2 — Scripted Motion:  Transport, place, and return to Home.
+
+The language instruction passed to GR00T contains only the target color
+(e.g. "red"), not the full instruction. Task routing (check-in vs check-out)
+is handled here in the orchestration layer.
+
+Usage
+-----
+  python eval_so100.py --robot <cfg> --lang_instruction "Check in red cube"
 """
 
 # =============================================================================
 # Imports
 # =============================================================================
 
-from dataclasses import asdict, dataclass
 import logging
-from pprint import pformat
 import time
-from typing import Any, Dict, List
+from dataclasses import asdict, dataclass
+from pprint import pformat
+from typing import Optional
 
-import cv2
 import draccus
-import numpy as np
 
 from gr00t.policy.server_client import PolicyClient
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
@@ -27,294 +35,148 @@ from lerobot.robots import (  # noqa: F401
     RobotConfig,
     make_robot_from_config,
 )
-from lerobot.robots import koch_follower  # noqa: F401
+from lerobot.robots import koch_follower       # noqa: F401
 from lerobot.robots import so_follower as so100_follower  # noqa: F401
 from lerobot.robots import so_follower as so101_follower  # noqa: F401
 from lerobot.utils.utils import init_logging, log_say
 
+from adapter      import So100Adapter
+from constants    import CHECK_OUT_ZONE, STORAGE_ZONE
+from motion       import move_to_home, scripted_transport
+from vision_utils import GraspDetector, check_task_success
 
 # =============================================================================
-# Task Vision Constants & Home Position
-# =============================================================================
-
-STORAGE_ZONE   = (277, 168, 96, 94)
-CHECK_IN_ZONE  = (399, 100, 99, 97)
-CHECK_OUT_ZONE = (152, 103, 96, 95)
-
-# Based on your calibration. 
-# Format: List of (Lower_HSV, Upper_HSV) tuples.
-# Note: Red requires two ranges because Hue wraps around 0 and 180.
-COLOR_RANGES = {
-    "red": [
-        (np.array([0, 10, 100]), np.array([10, 255, 255])),
-        (np.array([165, 10, 100]), np.array([180, 255, 255]))
-    ],
-    "blue": [
-        # Your blue V was very low (13), meaning it's dark. Range expanded to catch it.
-        (np.array([80, 50, 0]), np.array([120, 255, 255]))
-    ],
-    "yellow": [
-        (np.array([20, 50, 50]), np.array([45, 255, 255]))
-    ]
-}
-
-HOME_ACTION = {
-    "shoulder_pan.pos":    0.0,
-    "shoulder_lift.pos":  -60.0,
-    "elbow_flex.pos":      60.0,
-    "wrist_flex.pos":      60.0,
-    "wrist_roll.pos":      90.0,
-    "gripper.pos":         40.0,
-}
-
-# =============================================================================
-# Core Helper Functions
-# =============================================================================
-
-def recursive_add_extra_dim(obs: Dict) -> Dict:
-    for key, val in obs.items():
-        if isinstance(val, np.ndarray):
-            obs[key] = val[np.newaxis, ...]
-        elif isinstance(val, dict):
-            obs[key] = recursive_add_extra_dim(val)
-        else:
-            obs[key] = [val]  
-    return obs
-
-
-def move_to_home(robot: Robot, duration: float = 2.0):
-    """
-    Smoothly interpolates the robot from its current position to the HOME position 
-    using an ease-in/ease-out curve.
-    """
-    print(f">>> Smoothly moving to HOME position over {duration} seconds...")
-    
-    # 1. Read the current actual position of the robot
-    obs = robot.get_observation()
-    
-    # 2. Extract current joint values safely
-    current_state = {}
-    for joint_name in HOME_ACTION.keys():
-        # Fallback to HOME_ACTION if a key is missing to prevent crashes, 
-        # though standard LeRobot configs will always have these keys.
-        current_state[joint_name] = obs.get(joint_name, HOME_ACTION[joint_name])
-        
-    # 3. Setup interpolation parameters
-    hz = 30
-    steps = int(duration * hz)
-    
-    # 4. Interpolate over time
-    for step in range(steps):
-        tic = time.time()
-        
-        # Linear progress (t goes from 0.0 to 1.0)
-        t = step / max(1, steps - 1)
-        
-        # Smoothstep curve formula (Ease-in, Ease-out)
-        # This makes alpha start slow, speed up in the middle, and slow down at the end
-        alpha = t * t * (3.0 - 2.0 * t)
-        
-        # Calculate the interpolated action dictionary
-        interpolated_action = {}
-        for joint_name in HOME_ACTION.keys():
-            start_val = current_state[joint_name]
-            end_val = HOME_ACTION[joint_name]
-            # Standard Lerp formula based on our smooth alpha
-            interpolated_action[joint_name] = start_val + (end_val - start_val) * alpha
-            
-        # Send the intermediate command
-        robot.send_action(interpolated_action)
-        
-        # Maintain the loop frequency
-        toc = time.time()
-        if toc - tic < 1.0 / hz:
-            time.sleep(1.0 / hz - (toc - tic))
-
-
-def check_task_success(img_np, baseline_np, zone, color_name) -> bool:
-    """
-    Checks if a target color blob is securely inside the target zone,
-    using background subtraction to ignore static colored paper.
-    """
-    x, y, w, h = zone
-    
-    # Crop current frame and baseline frame
-    crop = img_np[y:y+h, x:x+w]
-    base_crop = baseline_np[y:y+h, x:x+w]
-    
-    # 1. Find what changed (Background Subtraction)
-    diff = cv2.absdiff(crop, base_crop)
-    gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
-    gray_diff = cv2.GaussianBlur(gray_diff, (5, 5), 0)
-    # Threshold: Pixels must change by at least 25 (out of 255) to be considered "new"
-    _, diff_mask = cv2.threshold(gray_diff, 25, 255, cv2.THRESH_BINARY)
-    
-    # 2. Find target colors in the current frame
-    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    color_mask = np.zeros((h, w), dtype=np.uint8)
-    ranges = COLOR_RANGES.get(color_name,[])
-    for (lower, upper) in ranges:
-        m = cv2.inRange(hsv, lower, upper)
-        color_mask = cv2.bitwise_or(color_mask, m)
-        
-    # 3. Combine them: Must be the right color AND a newly changed pixel!
-    # This completely eliminates the background paper.
-    final_mask = cv2.bitwise_and(color_mask, diff_mask)
-    
-    # Clean up noise
-    kernel = np.ones((5, 5), np.uint8)
-    final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_OPEN, kernel)
-    
-    # 4. Check contours
-    contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area > 100:  # Minimum pixel size of the cube
-            bx, by, bw, bh = cv2.boundingRect(cnt)
-            
-            # Check if the object touches the edges of the cropped zone
-            margin = 3
-            touches_left = (bx <= margin)
-            touches_right = (bx + bw >= w - margin)
-            touches_top = (by <= margin)
-            touches_bottom = (by + bh >= h - margin)
-            
-            if not (touches_left or touches_right or touches_top or touches_bottom):
-                return True
-                
-    return False
-
-# =============================================================================
-# Policy Adapter
-# =============================================================================
-
-class So100Adapter:
-    def __init__(self, policy_client: PolicyClient):
-        self.policy = policy_client
-        self.robot_state_keys = [
-            "shoulder_pan.pos", "shoulder_lift.pos", "elbow_flex.pos",
-            "wrist_flex.pos", "wrist_roll.pos", "gripper.pos",
-        ]
-        self.camera_keys = ["front", "wrist"]
-
-    def obs_to_policy_inputs(self, obs: Dict[str, Any]) -> Dict:
-        model_obs = {}
-        model_obs["video"] = {k: obs[k] for k in self.camera_keys}
-        state = np.array([obs[k] for k in self.robot_state_keys], dtype=np.float32)
-        model_obs["state"] = {
-            "single_arm": state[:5],
-            "gripper": state[5:6],
-        }
-        model_obs["language"] = {"annotation.human.task_description": obs["lang"]}
-        model_obs = recursive_add_extra_dim(model_obs)
-        model_obs = recursive_add_extra_dim(model_obs)
-        return model_obs
-
-    def decode_action_chunk(self, chunk: Dict, t: int) -> Dict[str, float]:
-        single_arm = chunk["single_arm"][0][t]
-        gripper = chunk["gripper"][0][t]
-        full = np.concatenate([single_arm, gripper], axis=0)
-        return {joint_name: float(full[i]) for i, joint_name in enumerate(self.robot_state_keys)}
-
-    def get_action(self, obs: Dict) -> List[Dict[str, float]]:
-        model_input = self.obs_to_policy_inputs(obs)
-        action_chunk, info = self.policy.get_action(model_input)
-        any_key = next(iter(action_chunk.keys()))
-        horizon = action_chunk[any_key].shape[1]
-        return [self.decode_action_chunk(action_chunk, t) for t in range(horizon)]
-
-# =============================================================================
-# Evaluation Config & Main Loop
+# Configuration
 # =============================================================================
 
 @dataclass
 class EvalConfig:
-    robot: RobotConfig
-    policy_host: str = "localhost"
-    policy_port: int = 5555
-    action_horizon: int = 8
-    lang_instruction: str = "Check in red cube" # CHANGE THIS ON CLI
-    play_sounds: bool = False
-    timeout: int = 40 # Maximum seconds before it forces a stop
+    robot:             RobotConfig
+    policy_host:       str  = "localhost"
+    policy_port:       int  = 5555
+    action_horizon:    int  = 8
+    lang_instruction:  str  = "Check in red cube"
+    play_sounds:       bool = False
+    vla_timeout:       int  = 20    # Max seconds for the VLA grasp phase
 
+
+# =============================================================================
+# Instruction Parser
+# =============================================================================
+
+def parse_instruction(instruction: str):
+    """
+    Parse the free-text instruction into (task_type, color, target_zone).
+    """
+    lower = instruction.lower()
+
+    if "out" in lower:
+        task_type   = "check_out"
+        target_zone = CHECK_OUT_ZONE
+    else:
+        task_type   = "check_in"
+        target_zone = STORAGE_ZONE
+
+    if "blue" in lower:
+        color = "blue"
+    elif "yellow" in lower:
+        color = "yellow"
+    else:
+        color = "red"
+
+    return task_type, color, target_zone
+
+
+# =============================================================================
+# Main Evaluation Loop
+# =============================================================================
 
 @draccus.wrap()
 def eval(cfg: EvalConfig):
     init_logging()
     logging.info(pformat(asdict(cfg)))
 
-    # 1. Parse the Instruction to determine Target Zone and Color
-    instruction = cfg.lang_instruction.lower()
-    
-    # Determine Action Type
-    if "in" in instruction:
-        target_zone = STORAGE_ZONE
-    elif "out" in instruction:
-        target_zone = CHECK_OUT_ZONE
-    else:
-        target_zone = STORAGE_ZONE # Default fallback
+    # ── Parse instruction ────────────────────────────────────────────────────
+    task_type, color, target_zone = parse_instruction(cfg.lang_instruction)
 
-    # Determine Target Color
-    target_color = "red"
-    if "blue" in instruction: target_color = "blue"
-    elif "yellow" in instruction: target_color = "yellow"
+    print(f"\n[PARSER] Instruction : {cfg.lang_instruction}")
+    print(f"[PARSER] Task type   : {task_type}")
+    print(f"[PARSER] Target color: {color}")
+    print(f"[PARSER] Target zone : {target_zone}\n")
 
-    print(f"\n[PARSER] Task: {cfg.lang_instruction}")
-    print(f"[PARSER] Looking for {target_color.upper()} cube in {target_zone}\n")
-
-    # 2. Initialize Hardware & Policy
-    robot = make_robot_from_config(cfg.robot)
+    # ── Initialise hardware and policy ───────────────────────────────────────
+    robot         = make_robot_from_config(cfg.robot)
     robot.connect()
-    
     policy_client = PolicyClient(host=cfg.policy_host, port=cfg.policy_port)
-    policy = So100Adapter(policy_client)
+    policy        = So100Adapter(policy_client)
 
-    log_say("Hardware and Policy initialized.", cfg.play_sounds)
+    log_say("Hardware and policy initialized.", cfg.play_sounds)
 
-    # 3. Move to Initial Home Position First
+    # ── Pre-flight: home + baseline snapshot ─────────────────────────────────
     move_to_home(robot)
-    time.sleep(0.5)  # Let the camera auto-exposure settle for a split second
-    
-    print(">>> Taking baseline snapshot of workspace...")
-    baseline_obs = robot.get_observation()
-    baseline_img = baseline_obs["front"]
+    time.sleep(0.5)   # let camera auto-exposure settle
 
-    # 4. Main Loop
+    print(">>> Taking baseline snapshot of workspace …")
+    baseline_img = robot.get_observation()["front"]
+
+    # ── Phase 1: VLA — approach and grasp ────────────────────────────────────
+    print("\n─── Phase 1: VLA Grasp ─────────────────────────────────────────")
+    log_say(f"Searching for {color} cube.", cfg.play_sounds)
+    print(">>> Monitoring wrist camera (5-second gate initiated) ...")
+
+    grasp_obs: Optional[dict] = None
     start_time = time.time()
     
+    # Initialize our sequential confirmation detector
+    grasp_detector = GraspDetector()
+
     while True:
-        # Failsafe Timeout
-        if time.time() - start_time > cfg.timeout:
-            print("\n[TIMEOUT] Max execution time reached. Terminating loop.")
-            break
+        # Failsafe timeout
+        if time.time() - start_time > cfg.vla_timeout:
+            print("\n[TIMEOUT] VLA grasp phase exceeded limit. Aborting.")
+            move_to_home(robot)
+            return
 
         obs = robot.get_observation()
-        obs["lang"] = cfg.lang_instruction 
-        
-        # --- VISION CHECK: IS TASK COMPLETE? ---
-        # Note: We now pass baseline_img in as the second argument!
-        is_done = check_task_success(obs["front"], baseline_img, target_zone, target_color)
-        
-        if is_done:
-            print(f"\n🎉 [SUCCESS] {target_color.upper()} cube securely detected in zone!")
-            print("🎉 [SUCCESS] Arm has cleared the area. Task Complete.")
+        obs["lang"] = color   # VLA sees the color string only
+
+        # Pass frame into the detector state machine
+        if grasp_detector.update(obs, color):
+            print(f"\n✅ [GRASP CONFIRMED] {color.upper()} cube secured!")
+            grasp_obs = obs
             break
 
-        # --- RUN INFERENCE ---
-        actions = policy.get_action(obs)
+        # Run one VLA inference step
+        actions = policy.get_action_chunk(obs)
 
-        for i, action_dict in enumerate(actions[: cfg.action_horizon]):
+        for action_dict in actions[: cfg.action_horizon]:
             tic = time.time()
             robot.send_action(action_dict)
-            toc = time.time()
-            if toc - tic < 1.0 / 30:
-                time.sleep(1.0 / 30 - (toc - tic))
+            elapsed = time.time() - tic
+            if elapsed < 1.0 / 30:
+                time.sleep(1.0 / 30 - elapsed)
 
-    # 5. Terminate: Return to Home 
-    print("\n>>> Task Finished. Returning to HOME position...")
-    move_to_home(robot)
-    print(">>> System Shutting Down cleanly.")
+    # ── Phase 2: Scripted transport ───────────────────────────────────────────
+    print("\n─── Phase 2: Scripted Transport ────────────────────────────────")
+    log_say("Grasp confirmed. Executing transport.", cfg.play_sounds)
+
+    scripted_transport(robot, task_type, grasp_obs)
+
+    # ── Post-task: verify placement with vision ───────────────────────────────
+    time.sleep(0.3)   # let the scene settle before checking
+    final_obs = robot.get_observation()
+    success   = check_task_success(
+        final_obs["front"], baseline_img, target_zone, color
+    )
+
+    if success:
+        print(f"\n🎉 [SUCCESS] {color.upper()} cube confirmed in target zone.")
+        log_say("Task complete.", cfg.play_sounds)
+    else:
+        print(f"\n⚠️  [WARN] Cube not detected in target zone after placement.")
+        log_say("Placement could not be confirmed.", cfg.play_sounds)
+
+    print("\n>>> Evaluation complete. System shutting down cleanly.")
 
 
 if __name__ == "__main__":

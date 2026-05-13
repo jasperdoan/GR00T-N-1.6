@@ -19,11 +19,11 @@ lerobot-record \
     --teleop.port=/dev/ttyACM1 \
     --teleop.id=leader_arm \
     --display_data=true \
-    --dataset.repo_id=so101/cube_man \
+    --dataset.repo_id=so101/cube_hybrid \
     --dataset.num_episodes=10 \
-    --dataset.single_task="Check in yellow cube" \
+    --dataset.single_task="red" \
     --dataset.push_to_hub=false \
-    --dataset.episode_time_s=8 \
+    --dataset.episode_time_s=6 \
     --dataset.reset_time_s=20 \
     --resume=true
 
@@ -140,8 +140,7 @@ Instead of a sudden jump, we implemented a 2.0-second **Ease-In/Ease-Out (Smooth
 
 Next Phase:
 
-
-Pivoting often referred to in robotics as moving from **End-to-End Control** to **Hybrid Modular Control**. **Proposal: Transitioning to a Hybrid Modular Architecture for Increased Reliability**
+Changing how we do things a bit: Pivoting **End-to-End Control** to **Hybrid Modular Control**. **Proposal: Transitioning to a Hybrid Modular Architecture for Increased Reliability**
 
 Could we significantly increase task success rates by narrowing the GR00T-VLA’s responsibility to high-entropy 'Approach and Grasp' maneuvers while delegating low-entropy 'Transport and Placement' to programmatic trajectories? Currently, the model exhibits cumulative error over long horizons, leading to inconsistency during the transport phase—a portion of the task that requires high spatial precision but low visual reasoning. By treating the VLA as a 'Visual Servoing' specialist, we would leverage its ability to handle varied cube placements to achieve a secure grasp; once the gripper's state indicates a successful hold, the system would hand off control to a scripted, interpolated kinematic path (A-to-B). This approach is backed by the principle of **Dimensionality Reduction in Action Space**: by removing the transport phase from the neural network's burden, we eliminate the risk of 'model drift' during movement, ensuring that once an object is secured, the final delivery is mathematically guaranteed and executionally smooth.
 
@@ -179,13 +178,50 @@ lerp to "vertically up/picking up" position
 ```
 {
     "shoulder_pan.pos": __,     <-- Keep the same
-    "shoulder_lift.pos": -__,
-    "elbow_flex.pos": __,
-    "wrist_flex.pos": __,
-    "wrist_roll.pos": __,
-    "gripper.pos": __
+    "shoulder_lift.pos": 15.3,
+    "elbow_flex.pos": -3.4,
+    "wrist_flex.pos": 71.1,
+    "wrist_roll.pos": __, <-- Keep the same
+    "gripper.pos": __      <-- Keep the same
 }
 ```
+lerp to storage zone > (-1 to 1 degrees) random add for variation
+```
+{
+    "shoulder_pan.pos": 0,
+    "shoulder_lift.pos": 19.5,
+    "elbow_flex.pos": -12.1,
+    "wrist_flex.pos": 72.6,
+    "wrist_roll.pos": 63.8,
+    "gripper.pos": __      <-- Keep the same
+}
+```
+drop > (-1 to 1 degrees) random add for variation
+```
+{
+    "shoulder_pan.pos": 0,
+    "shoulder_lift.pos": 19.5,
+    "elbow_flex.pos": -12.1,
+    "wrist_flex.pos": 72.6,
+    "wrist_roll.pos": 63.8,
+    "gripper.pos": 40
+}
+```
+Wait for a tiny bit / pause for like 1 second
+then lerp back to home position ...
+
+The lerping between waypoints should be smooth and immediate.
 
 
-Now this begs the question. How do we detect when the robot has successfully grasped the cube? This is a hard one because we are unsure of the exact moment when it has reached the cube and has a secure grip onto it.
+
+And likewise for check out area it would be shoulder_pan.pos = -48.2
+
+
+Now this begs the question. How do we detect when the robot has successfully grasped the cube? This is a hard one because we are unsure of the exact moment when it has reached the cube and has a secure grip onto it. My only thought is to similar to how we currently do detection, we can have a function to check along with something else. Like maybe if gripper.pos around ~16.5 +/- 1.0 degrees it is in a closed position and probably has grasped it. We would want to check the wrist camera and do some kind of confirmation detection to interupt so we can move to the scripted part. Open to ideas.
+
+
+Also it would be helpful if we make a different file for organization purposes to eval is kept nice, straight forward and clean. Maybe within the same folder:
+gr00t/eval/real_robot/SO100/eval_so100.py
+
+
+
