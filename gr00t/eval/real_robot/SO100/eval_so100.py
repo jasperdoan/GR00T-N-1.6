@@ -115,7 +115,7 @@ def eval(cfg: EvalConfig):
     # ── Pre-flight: home + baseline snapshot ─────────────────────────────────
     move_to_home(robot)
     time.sleep(0.1)   # let camera auto-exposure settle
-    move_to_ready(robot)
+    move_to_ready(robot, task_type)
 
     print(">>> Taking baseline snapshot of workspace …")
     baseline_img = robot.get_observation()["front"]

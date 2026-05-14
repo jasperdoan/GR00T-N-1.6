@@ -38,9 +38,9 @@ python3 -m gr00t.experiment.launch_finetune \
     --max_steps 10000 \
     --random_rotation_angle 5 \
     --warmup_ratio 0.1 \
-    --state_dropout_prob 0.2 \
-    --weight_decay 1e-3 \
-    --learning_rate 5e-5 \
+    --state_dropout_prob 0.1 \
+    --weight_decay 1e-4 \
+    --learning_rate 1e-4 \
     --global_batch_size 32 \
     --color_jitter_params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
     --episode_sampling_rate 1.0 \

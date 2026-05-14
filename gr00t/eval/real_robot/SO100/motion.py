@@ -97,11 +97,13 @@ def move_to_home(robot, duration: float = LERP_DURATION_HOME) -> None:
     lerp_to_waypoint(robot, HOME_ACTION, duration)
 
 
-def move_to_ready(robot, duration: float = LERP_DURATION_LIFT) -> None:
+def move_to_ready(robot, task, duration: float = LERP_DURATION_LIFT) -> None:
     """Smoothly move the robot to the lift position."""
     print(f">>> Moving to LIFT over {duration:.1f}s …")
+    angle = 36.2 if task == "check_in" else 0
+
     d = {
-        "shoulder_pan.pos":  36.2,
+        "shoulder_pan.pos":  angle,
         "shoulder_lift.pos": -21.1,
         "elbow_flex.pos":    27.1,
         "wrist_flex.pos":    78.4,
