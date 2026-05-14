@@ -1,250 +1,183 @@
 """
-SO100 Real-Robot Gr00T Policy Evaluation Script
+SO100 Hybrid Modular Evaluation Script
+=======================================
 
-This script runs closed-loop policy evaluation on the SO100 / SO101 robots
-using the GR00T Policy API.
+Architecture
+------------
+  Phase 1 — VLA (GR00T):      Approach and grasp the target cube.
+  Phase 2 — Scripted Motion:  Transport, place, and return to Home.
 
-Major responsibilities:
-    • Initialize robot hardware from a RobotConfig (LeRobot)
-    • Convert robot observations into GR00T VLA inputs
-    • Query the GR00T policy server (PolicyClient)
-    • Decode multi-step (temporal) model actions back into robot motor commands
-    • Stream actions to the real robot in real time
+The language instruction passed to GR00T contains only the target color
+(e.g. "red"), not the full instruction. Task routing (check-in vs check-out)
+is handled here in the orchestration layer.
 
-This file is meant to be a simple, readable reference
-for real-world policy debugging and demos.
+Usage
+-----
+  python eval_so100.py --robot <cfg> --lang_instruction "Check in red cube"
 """
 
 # =============================================================================
 # Imports
 # =============================================================================
 
-from dataclasses import asdict, dataclass
 import logging
-from pprint import pformat
 import time
-from typing import Any, Dict, List
+from dataclasses import asdict, dataclass
+from pprint import pformat
+from typing import Optional
 
 import draccus
-from gr00t.policy.server_client import PolicyClient
 
-# Importing various robot configs ensures CLI autocompletion works
+from gr00t.policy.server_client import PolicyClient
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
     make_robot_from_config,
-    # koch_follower,
-    # so100_follower,
-    # so101_follower,
 )
-from lerobot.robots import koch_follower  # noqa: F401
+from lerobot.robots import koch_follower       # noqa: F401
 from lerobot.robots import so_follower as so100_follower  # noqa: F401
 from lerobot.robots import so_follower as so101_follower  # noqa: F401
 from lerobot.utils.utils import init_logging, log_say
-import numpy as np
 
-
-def recursive_add_extra_dim(obs: Dict) -> Dict:
-    """
-    Recursively add an extra dim to arrays or scalars.
-
-    GR00T Policy Server expects:
-        obs: (batch=1, time=1, ...)
-    Calling this function twice achieves that.
-    """
-    for key, val in obs.items():
-        if isinstance(val, np.ndarray):
-            obs[key] = val[np.newaxis, ...]
-        elif isinstance(val, dict):
-            obs[key] = recursive_add_extra_dim(val)
-        else:
-            obs[key] = [val]  # scalar → [scalar]
-    return obs
-
-
-class So100Adapter:
-    """
-    Adapter between:
-        • Raw robot observation dictionary
-        • GR00T VLA input format
-        • GR00T action chunk → robot joint commands
-
-    Responsible for:
-        • Packaging camera frames as obs["video"]
-        • Building obs["state"] for arm + gripper
-        • Adding language instruction
-        • Adding batch/time dimensions
-        • Decoding model action chunks into real robot actions
-    """
-
-    def __init__(self, policy_client: PolicyClient):
-        self.policy = policy_client
-
-        # SO100 joint ordering used for BOTH training + robot execution
-        self.robot_state_keys = [
-            "shoulder_pan.pos",
-            "shoulder_lift.pos",
-            "elbow_flex.pos",
-            "wrist_flex.pos",
-            "wrist_roll.pos",
-            "gripper.pos",
-        ]
-
-        self.camera_keys = ["front", "wrist"]
-
-    # -------------------------------------------------------------------------
-    # Observation → Model Input
-    # -------------------------------------------------------------------------
-    def obs_to_policy_inputs(self, obs: Dict[str, Any]) -> Dict:
-        """
-        Convert raw robot observation dict into the structured GR00T VLA input.
-        """
-        model_obs = {}
-
-        # (1) Cameras
-        model_obs["video"] = {k: obs[k] for k in self.camera_keys}
-
-        # (2) Arm + gripper state
-        state = np.array([obs[k] for k in self.robot_state_keys], dtype=np.float32)
-        model_obs["state"] = {
-            "single_arm": state[:5],  # (5,)
-            "gripper": state[5:6],  # (1,)
-        }
-
-        # (3) Language
-        model_obs["language"] = {"annotation.human.task_description": obs["lang"]}
-
-        # (4) Add (B=1, T=1) dims
-        model_obs = recursive_add_extra_dim(model_obs)
-        model_obs = recursive_add_extra_dim(model_obs)
-        return model_obs
-
-    # -------------------------------------------------------------------------
-    # Model Action Chunk → Robot Motor Commands
-    # -------------------------------------------------------------------------
-    def decode_action_chunk(self, chunk: Dict, t: int) -> Dict[str, float]:
-        """
-        chunk["single_arm"]: (B, T, 5)
-        chunk["gripper"]:    (B, T, 1)
-
-        Convert to:
-            {
-                "shoulder_pan.pos": val,
-                ...
-            }
-        for timestep t.
-        """
-        single_arm = chunk["single_arm"][0][t]  # (5,)
-        gripper = chunk["gripper"][0][t]  # (1,)
-
-        full = np.concatenate([single_arm, gripper], axis=0)  # (6,)
-
-        return {joint_name: float(full[i]) for i, joint_name in enumerate(self.robot_state_keys)}
-
-    def get_action(self, obs: Dict) -> List[Dict[str, float]]:
-        """
-        Returns a list of robot motor commands (one per model timestep).
-        """
-        model_input = self.obs_to_policy_inputs(obs)
-        action_chunk, info = self.policy.get_action(model_input)
-
-        # Determine horizon
-        any_key = next(iter(action_chunk.keys()))
-        horizon = action_chunk[any_key].shape[1]  # (B, T, D) → T
-
-        return [self.decode_action_chunk(action_chunk, t) for t in range(horizon)]
-
+from adapter      import So100Adapter
+from constants    import CHECK_OUT_ZONE, STORAGE_ZONE
+from motion       import move_to_home, scripted_transport, move_to_ready
+from vision_utils import GraspDetector, check_task_success
 
 # =============================================================================
-# Evaluation Config
+# Configuration
 # =============================================================================
-
 
 @dataclass
 class EvalConfig:
-    """
-    Command-line configuration for real-robot policy evaluation.
-    """
-
-    robot: RobotConfig
-    policy_host: str = "localhost"
-    policy_port: int = 5555
-    action_horizon: int = 8
-    lang_instruction: str = "Grab markers and place into pen holder."
-    play_sounds: bool = False
-    timeout: int = 30
+    robot:             RobotConfig
+    policy_host:       str  = "localhost"
+    policy_port:       int  = 5555
+    action_horizon:    int  = 16
+    lang_instruction:  str  = "Check in red cube"
+    play_sounds:       bool = False
+    vla_timeout:       int  = 20    # Max seconds for the VLA grasp phase
 
 
 # =============================================================================
-# Main Eval Loop
+# Instruction Parser
 # =============================================================================
 
+def parse_instruction(instruction: str):
+    """
+    Parse the free-text instruction into (task_type, color, target_zone).
+    """
+    lower = instruction.lower()
+
+    if "out" in lower:
+        task_type   = "check_out"
+        target_zone = CHECK_OUT_ZONE
+    else:
+        task_type   = "check_in"
+        target_zone = STORAGE_ZONE
+
+    if "blue" in lower:
+        color = "blue"
+    elif "yellow" in lower:
+        color = "yellow"
+    else:
+        color = "red"
+
+    return task_type, color, target_zone
+
+
+# =============================================================================
+# Main Evaluation Loop
+# =============================================================================
 
 @draccus.wrap()
 def eval(cfg: EvalConfig):
-    """
-    Main entry point for real-robot policy evaluation.
-    """
     init_logging()
     logging.info(pformat(asdict(cfg)))
 
-    # -------------------------------------------------------------------------
-    # 1. Initialize Robot Hardware
-    # -------------------------------------------------------------------------
-    robot = make_robot_from_config(cfg.robot)
+    # ── Parse instruction ────────────────────────────────────────────────────
+    task_type, color, target_zone = parse_instruction(cfg.lang_instruction)
+
+    print(f"\n[PARSER] Instruction : {cfg.lang_instruction}")
+    print(f"[PARSER] Task type   : {task_type}")
+    print(f"[PARSER] Target color: {color}")
+    print(f"[PARSER] Target zone : {target_zone}\n")
+
+    # ── Initialise hardware and policy ───────────────────────────────────────
+    robot         = make_robot_from_config(cfg.robot)
     robot.connect()
-
-    log_say("Initializing robot", cfg.play_sounds, blocking=True)
-
-    # -------------------------------------------------------------------------
-    # 2. Initialize Policy Wrapper + Client
-    # -------------------------------------------------------------------------
     policy_client = PolicyClient(host=cfg.policy_host, port=cfg.policy_port)
-    policy = So100Adapter(policy_client)
+    policy        = So100Adapter(policy_client)
 
-    log_say(
-        f'Policy ready with instruction: "{cfg.lang_instruction}"',
-        cfg.play_sounds,
-        blocking=True,
+    log_say("Hardware and policy initialized.", cfg.play_sounds)
+
+    # ── Pre-flight: home + baseline snapshot ─────────────────────────────────
+    move_to_home(robot)
+    time.sleep(0.1)   # let camera auto-exposure settle
+    move_to_ready(robot, task_type)
+
+    print(">>> Taking baseline snapshot of workspace …")
+    baseline_img = robot.get_observation()["front"]
+
+    # ── Phase 1: VLA — approach and grasp ────────────────────────────────────
+    print("\n─── Phase 1: VLA Grasp ─────────────────────────────────────────")
+    log_say(f"Searching for {color} cube.", cfg.play_sounds)
+    print(">>> Monitoring wrist camera (VLA_GRASP_MIN_TIME gate initiated) ...")
+
+    grasp_obs: Optional[dict] = None
+    start_time = time.time()
+    
+    # Initialize our sequential confirmation detector
+    grasp_detector = GraspDetector()
+
+    while True:
+        # Failsafe timeout
+        if time.time() - start_time > cfg.vla_timeout:
+            print("\n[TIMEOUT] VLA grasp phase exceeded limit. Aborting.")
+            move_to_home(robot)
+            return
+
+        obs = robot.get_observation()
+        obs["lang"] = color   # VLA sees the color string only
+
+        # Pass frame into the detector state machine
+        if grasp_detector.update(obs, color):
+            print(f"\n✅ [GRASP CONFIRMED] {color.upper()} cube secured!")
+            grasp_obs = obs
+            break
+
+        # Run one VLA inference step
+        actions = policy.get_action_chunk(obs)
+
+        for action_dict in actions[: cfg.action_horizon]:
+            tic = time.time()
+            robot.send_action(action_dict)
+            elapsed = time.time() - tic
+            if elapsed < 1.0 / 30:
+                time.sleep(1.0 / 30 - elapsed)
+
+    # ── Phase 2: Scripted transport ───────────────────────────────────────────
+    print("\n─── Phase 2: Scripted Transport ────────────────────────────────")
+    log_say("Grasp confirmed. Executing transport.", cfg.play_sounds)
+
+    scripted_transport(robot, task_type, grasp_obs)
+
+    # ── Post-task: verify placement with vision ───────────────────────────────
+    time.sleep(0.3)   # let the scene settle before checking
+    final_obs = robot.get_observation()
+    success   = check_task_success(
+        final_obs["front"], baseline_img, target_zone, color
     )
 
-    # -------------------------------------------------------------------------
-    # 3. Main real-time control loop
-    # -------------------------------------------------------------------------
-    while True:
-        obs = robot.get_observation()
-        obs["lang"] = cfg.lang_instruction  # insert language
+    if success:
+        print(f"\n🎉 [SUCCESS] {color.upper()} cube confirmed in target zone.")
+        log_say("Task complete.", cfg.play_sounds)
+    else:
+        print(f"\n⚠️  [WARN] Cube not detected in target zone after placement.")
+        log_say("Placement could not be confirmed.", cfg.play_sounds)
 
-        # obs = {
-        #     "front": np.zeros((480, 640, 3), dtype=np.uint8),
-        #     "wrist": np.zeros((480, 640, 3), dtype=np.uint8),
-        #     "shoulder_pan.pos": 0.0,
-        #     "shoulder_lift.pos": 0.0,
-        #     "elbow_flex.pos": 0.0,
-        #     "wrist_flex.pos": 0.0,
-        #     "wrist_roll.pos": 0.0,
-        #     "gripper.pos": 0.0,
-        #     "lang": cfg.lang_instruction,
-        # }
-
-        actions = policy.get_action(obs)
-
-        for i, action_dict in enumerate(actions[: cfg.action_horizon]):
-            tic = time.time()
-            print(f"action[{i}]: {action_dict}")
-            # action_dict = {
-            #     "shoulder_pan.pos":    5.038022994995117,
-            #     "shoulder_lift.pos":  17.09104347229004,
-            #     "elbow_flex.pos":    -18.519847869873047,
-            #     "wrist_flex.pos":     86.86847686767578,
-            #     "wrist_roll.pos":      1.0669738054275513,
-            #     "gripper.pos":        36.83877944946289,
-            # }
-            robot.send_action(action_dict)
-            toc = time.time()
-            if toc - tic < 1.0 / 30:
-                time.sleep(1.0 / 30 - (toc - tic))
+    print("\n>>> Evaluation complete. System shutting down cleanly.")
 
 
 if __name__ == "__main__":
