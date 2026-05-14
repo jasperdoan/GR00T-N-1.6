@@ -122,6 +122,6 @@ PLACE_VARIATION_DEG = 2.0   # uniform random in [-X, +X] degrees per joint
 POST_DROP_PAUSE = 0.25      # Pause duration after dropping the cube (seconds)
 
 LERP_DURATION_LIFT  = 1.0
-LERP_DURATION_PLACE = 1.5
+LERP_DURATION_PLACE = 1.0
 LERP_DURATION_DROP  = 0.1
-LERP_DURATION_HOME  = 2.0
+LERP_DURATION_HOME  = 1.0
