@@ -1,3 +1,7 @@
+sudo chmod 666 /dev/ttyACM0
+sudo chmod 666 /dev/ttyACM1
+
+
 lerobot-teleoperate \
     --robot.type=so101_follower \
     --robot.port=/dev/ttyACM0 \
@@ -225,3 +229,48 @@ gr00t/eval/real_robot/SO100/eval_so100.py
 
 
 
+
+
+
+
+def _build_color_mask(hsv: np.ndarray, color_name: str, color_ranges: Dict) -> np.ndarray:
+    """Return a binary mask of pixels matching the named color from the provided dict."""
+    h, w = hsv.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    for lower, upper in color_ranges.get(color_name,[]):
+        mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lower, upper))
+    return mask
+
+
+def _clean_mask(mask: np.ndarray, kernel_size: int = 5) -> np.ndarray:
+    """Remove small noise blobs with a morphological open."""
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+    return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+
+def _color_pixel_count(image_arr: np.ndarray, color_name: str, color_ranges: Dict, debug_save: bool = False) -> int:
+    """Return the total number of pixels matching color_name in image_arr."""
+    # 1. Safeguard: handle float vs uint8
+    if image_arr.dtype != np.uint8:
+        img_uint8 = (image_arr * 255).clip(0, 255).astype(np.uint8)
+    else:
+        img_uint8 = image_arr.copy()
+
+    # 2. CHANGE THIS LINE: Use RGB2HSV because LeRobot/Camera is likely RGB
+    hsv = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2HSV)
+    
+    # 3. Build and clean mask
+    mask = _build_color_mask(hsv, color_name, color_ranges)
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    
+    # -------------------------------------------------------------------------
+    # DEBUG: Correct the image for saving so it looks normal on your PC
+    # -------------------------------------------------------------------------
+    if debug_save:
+        # To save an RGB image correctly with OpenCV, we must swap it back to BGR
+        save_ready = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2BGR)
+        cv2.imwrite("DEBUG_wrist_crop_color.jpg", save_ready)
+        cv2.imwrite("DEBUG_wrist_mask.jpg", mask)
+        
+    return int(np.sum(mask > 0))
