@@ -94,7 +94,7 @@ GRIPPER_GRASP_TOL   = 1.5    # ± tolerance in degrees
 
 # Maximum gripper position allowed during transport.
 # Clamps the locked value so a slightly-open grasp (e.g. 22°) can't slip further.
-GRIPPER_TRANSPORT_MAX = GRIPPER_GRASP_POS + 2.0
+GRIPPER_TRANSPORT_MAX = GRIPPER_GRASP_POS + 3.0
 
 # =============================================================================
 # Task-Specific Ready / Approach Positions

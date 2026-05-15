@@ -1,32 +1,82 @@
 """
-SO100 Async Policy Runner (Time-Aligned Queue)
-==============================================
-Runs VLA inference in a background thread. When a new chunk arrives, it 
-calculates exactly how many steps elapsed during inference and fast-forwards 
-the chunk so the robot never jumps backward in time.
+SO100 Async Policy Runner (Time-Aligned Temporal Ensemble)
+==========================================================
+State-of-the-art Action Chunking execution. 
+1. Runs VLA inference in a background thread to prevent blocking.
+2. Fast-forwards new chunks based on the exact step the thread started.
+3. Exponentially averages overlapping chunks (Temporal Ensembling) to smooth 
+   out VLA noise and create flawless transitions between trajectories.
 """
 
 import threading
-import time
-from typing import Dict, Optional, List
+from collections import deque
+from typing import Deque, Dict, List, Optional, Tuple
 import numpy as np
+import time
+
+class TemporalEnsemble:
+    def __init__(self, temperature: float = 0.1) -> None:
+        self.temperature = temperature
+        # Stores tuples of (start_step, chunk_list)
+        self._chunks: Deque[Tuple[int, List[Dict[str, float]]]] = deque()
+
+    def add_chunk(self, start_step: int, chunk: List[Dict[str, float]]) -> None:
+        """Register a chunk bound to the exact global timestep it was requested."""
+        self._chunks.append((start_step, chunk))
+
+    def get_action(self, current_step: int) -> Optional[Dict[str, float]]:
+        # 1. Prune expired chunks (if their end step is in the past)
+        while self._chunks and (self._chunks[0][0] + len(self._chunks[0][1]) <= current_step):
+            self._chunks.popleft()
+
+        if not self._chunks:
+            return None
+
+        candidates: List[Dict[str, float]] = []
+        weights: List[float] = []
+
+        # 2. Iterate from newest chunk (age 0) to oldest
+        for age, (start_step, chunk) in enumerate(reversed(self._chunks)):
+            # Calculate exactly where we are inside THIS chunk's timeline
+            idx = current_step - start_step
+            
+            # If the chunk is valid for the current moment in time, use it
+            if 0 <= idx < len(chunk):
+                candidates.append(chunk[idx])
+                weights.append(np.exp(-self.temperature * age))
+
+        if not candidates:
+            return None
+
+        # 3. Blend the overlapping actions
+        total_w = sum(weights)
+        norm_w = [w / total_w for w in weights]
+        joints = list(candidates[0].keys())
+
+        blended = {
+            j: float(sum(w * c[j] for w, c in zip(norm_w, candidates)))
+            for j in joints
+        }
+        return blended
+
+    def reset(self) -> None:
+        self._chunks.clear()
 
 class AsyncPolicyRunner:
     def __init__(
         self,
         policy,
         replan_every: int = 6,
-        ensemble_temp: float = 0.1,  # Kept in signature so eval_so100.py doesn't break
+        ensemble_temp: float = 0.1,
     ) -> None:
         self.policy = policy
         self.replan_every = replan_every
-        
-        self._thread = None
+        self.ensemble = TemporalEnsemble(temperature=ensemble_temp)
+
+        self._thread: Optional[threading.Thread] = None
+        self._pending_chunk: Optional[Tuple[int, List[Dict[str, float]]]] = None
         self._lock = threading.Lock()
         
-        self._pending_chunk = None
-        self._pending_start_step = 0
-        self._current_chunk = []
         self._step = 0
         self._steps_since_replan = 0
 
@@ -36,26 +86,22 @@ class AsyncPolicyRunner:
         except Exception as exc:
             print(f"[AsyncPolicyRunner] Inference error: {exc}")
             chunk = None
-            
         with self._lock:
-            self._pending_chunk = chunk
-            self._pending_start_step = start_step
+            if chunk is not None:
+                self._pending_chunk = (start_step, chunk)
 
     def step(self, obs: Dict) -> Optional[Dict[str, float]]:
-        # 1. Promote a newly arrived chunk, aligned to the current timeline
+        # 1. Catch completed background chunks and add them to the ensemble
         with self._lock:
             if self._pending_chunk is not None:
-                elapsed = self._step - self._pending_start_step
-                if elapsed < len(self._pending_chunk):
-                    self._current_chunk = self._pending_chunk[elapsed:]
-                else:
-                    self._current_chunk = [self._pending_chunk[-1]] # Keep last action if we overran
+                start_step, chunk = self._pending_chunk
+                self.ensemble.add_chunk(start_step, chunk)
                 self._pending_chunk = None
 
-        # 2. Trigger background inference if it's time
+        # 2. Check if we need to launch a new inference thread
         thread_idle = self._thread is None or not self._thread.is_alive()
         if self._steps_since_replan >= self.replan_every and thread_idle:
-            # Safely copy observation (handles both numpy arrays and torch tensors)
+            # Safely copy to prevent PyTorch tensor errors
             obs_snap = {}
             for k, v in obs.items():
                 if isinstance(v, np.ndarray):
@@ -73,35 +119,29 @@ class AsyncPolicyRunner:
             self._thread.start()
             self._steps_since_replan = 0
 
-        self._step += 1
-        self._steps_since_replan += 1
-
-        # 3. Bootstrap stall (only happens on the very first step)
-        if not self._current_chunk and self._thread is not None and self._thread.is_alive():
+        # 3. Bootstrap block (only on the very first frame)
+        action = self.ensemble.get_action(self._step)
+        if action is None and self._thread is not None and self._thread.is_alive():
             print("[AsyncPolicyRunner] Waiting for first inference chunk...")
             self._thread.join()
             with self._lock:
                 if self._pending_chunk is not None:
-                    elapsed = self._step - self._pending_start_step
-                    if elapsed < len(self._pending_chunk):
-                        self._current_chunk = self._pending_chunk[elapsed:]
-                    else:
-                        self._current_chunk = [self._pending_chunk[-1]]
+                    start_step, chunk = self._pending_chunk
+                    self.ensemble.add_chunk(start_step, chunk)
                     self._pending_chunk = None
+            action = self.ensemble.get_action(self._step)
 
-        # 4. Pop the next action (but repeat the last one if we run completely dry)
-        if self._current_chunk:
-            if len(self._current_chunk) > 1:
-                return self._current_chunk.pop(0)
-            else:
-                return self._current_chunk[0]
-        return None
+        # 4. Advance clock
+        self._step += 1
+        self._steps_since_replan += 1
+
+        return action
 
     def reset(self) -> None:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
+        self.ensemble.reset()
         with self._lock:
             self._pending_chunk = None
-        self._current_chunk = []
         self._step = 0
         self._steps_since_replan = 0
