@@ -111,7 +111,7 @@ STORAGE_PLACE = {
 }
 
 CHECKOUT_PLACE = {
-    "shoulder_pan.pos":  -48.2,
+    "shoulder_pan.pos":  -50.2,
     "shoulder_lift.pos": 19.5,
     "elbow_flex.pos":   -12.1,
     "wrist_flex.pos":    72.6,

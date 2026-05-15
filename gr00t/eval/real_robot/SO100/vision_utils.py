@@ -89,34 +89,47 @@ def check_task_success(
     Returns True when the target cube is stably placed inside zone AND the robot
     arm has cleared the area.
     """
-    x, y, w, h = zone
+    # 1. Safeguard: Ensure we are working with uint8 RGB
+    def to_uint8(img):
+        if img.dtype != np.uint8:
+            return (img * 255).clip(0, 255).astype(np.uint8)
+        return img
 
-    crop      = current_frame[y : y + h, x : x + w]
-    base_crop = baseline_frame[y : y + h, x : x + w]
+    curr_u8 = to_uint8(current_frame)
+    base_u8 = to_uint8(baseline_frame)
+
+    x, y, w, h = zone
+    crop      = curr_u8[y : y + h, x : x + w]
+    base_crop = base_u8[y : y + h, x : x + w]
 
     # --- Step 1: background subtraction ---
+    # We use RGB2GRAY because the input is likely RGB
     diff      = cv2.absdiff(crop, base_crop)
-    gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+    gray_diff = cv2.cvtColor(diff, cv2.COLOR_RGB2GRAY) 
     gray_diff = cv2.GaussianBlur(gray_diff, (5, 5), 0)
     _, diff_mask = cv2.threshold(gray_diff, diff_threshold, 255, cv2.THRESH_BINARY)
 
-    # --- Step 2: color mask (using front cam ranges) ---
-    hsv        = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    # --- Step 2: color mask ---
+    # FIX: Use RGB2HSV instead of BGR2HSV
+    hsv        = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
     color_mask = _build_color_mask(hsv, color_name, COLOR_RANGES)
 
     # --- Step 3: intersection ---
+    # This ensures we only care about colored objects that WEREN'T there before
     final_mask = cv2.bitwise_and(color_mask, diff_mask)
     final_mask = _clean_mask(final_mask)
 
     # --- Step 4: contour analysis ---
     contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+    found_valid_blob = False
     for cnt in contours:
         if cv2.contourArea(cnt) < MIN_BLOB_AREA_PX:
             continue
 
         bx, by, bw, bh = cv2.boundingRect(cnt)
 
+        # The 'touches_edge' check ignores the robot arm if it's poking into the zone
         touches_edge = (
             bx <= edge_margin
             or by <= edge_margin
@@ -125,9 +138,10 @@ def check_task_success(
         )
 
         if not touches_edge:
-            return True
-
-    return False
+            found_valid_blob = True
+            break
+            
+    return found_valid_blob
 
 
 # =============================================================================
