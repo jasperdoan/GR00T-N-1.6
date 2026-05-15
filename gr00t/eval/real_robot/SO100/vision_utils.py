@@ -227,13 +227,14 @@ class GraspDetector:
         color_px = _color_pixel_count(roi_bgr, color_name, WRIST_COLOR_RANGES)
         has_color = color_px >= WRIST_MIN_COLOR_PX
 
-        # --- Signal C: Gripper Loose Check ---
+        # --- Signal C: Gripper STRICT Check ---
+        # Gripper must be physically closed. If grasp is ~15, it must be <= 20.
         gripper_pos = obs.get("gripper.pos", GRIPPER_OPEN_POS)
-        is_gripping = float(gripper_pos) < (GRIPPER_OPEN_POS - 2.0)
+        is_gripping = float(gripper_pos) <= (GRIPPER_GRASP_POS + 2.0)
 
         frame_success = is_stable and has_color and is_gripping
 
-        print(f'Grasp detection frame: {frame_success} - is_stable: {is_stable}, has_color: {has_color} (px: {color_px}), is_gripping: {is_gripping}')
+        print(f'Grasp check: {frame_success} | stable: {is_stable} | color: {has_color} (px: {color_px}) | gripping: {is_gripping} (pos: {float(gripper_pos):.1f})')
 
         self.history.append(frame_success)
         return len(self.history) == self.history.maxlen and all(self.history)

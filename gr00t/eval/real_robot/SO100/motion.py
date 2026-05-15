@@ -112,75 +112,49 @@ def _catmull_rom(p0: float, p1: float, p2: float, p3: float, t: float) -> float:
     )
 
 
-def spline_trajectory(
+def arc_trajectory(
     robot,
-    waypoints: List[Dict[str, float]],
-    durations: List[float],
+    p_mid: Dict[str, float],
+    p_end: Dict[str, float],
+    duration: float,
     fixed_joints: Optional[Dict[str, float]] = None,
 ) -> None:
     """
-    Execute a smooth Catmull-Rom spline through a sequence of joint-space waypoints.
-
-    Unlike chaining lerp_to_waypoint() calls (which decelerate to a full stop
-    at every waypoint before accelerating again), Catmull-Rom keeps velocity
-    continuous at internal waypoints so the robot *flows through* them.
-
-    The robot's live state at call-time is implicitly used as the start point,
-    so no manual "read current pose" step is needed.  Joints not specified in a
-    waypoint dict inherit from the previous waypoint (or the current state for
-    the first one), so you only need to list joints that actually change.
-
-    Args:
-        robot:        LeRobot Robot instance.
-        waypoints:    N dicts, each a partial or full joint map.  At least 2.
-        durations:    N − 1 floats — time budget for each segment in seconds.
-        fixed_joints: Joints held constant throughout the entire trajectory
-                      (e.g. {"gripper.pos": 14.5} during transport).
-
-    Raises:
-        AssertionError if len(durations) != len(waypoints) - 1.
+    Executes a smooth Quadratic Bezier curve.
+    Instead of rigidly stopping at waypoints, this sweeps smoothly from the
+    current pose, pulls gracefully toward p_mid, and lands exactly at p_end.
     """
-    assert len(waypoints) >= 2, "Need at least 2 waypoints."
-    assert len(durations) == len(waypoints) - 1, (
-        f"Expected {len(waypoints) - 1} durations for {len(waypoints)} waypoints, "
-        f"got {len(durations)}."
-    )
+    obs = robot.get_observation()
+    p0 = {j: float(obs.get(j, HOME_ACTION.get(j, 0.0))) for j in JOINT_NAMES}
+    p1 = {**p0, **p_mid}
+    p2 = {**p0, **p_end}
 
-    # Read live state once; use it as the implicit start point
-    obs     = robot.get_observation()
-    current = {j: float(obs.get(j, HOME_ACTION.get(j, 0.0))) for j in JOINT_NAMES}
+    steps = max(2, int(duration * CONTROL_HZ))
+    for step in range(steps):
+        tic = time.time()
+        
+        # Smoothstep time scaling for gentle acceleration/deceleration
+        t = step / (steps - 1)
+        t_smooth = t * t * (3.0 - 2.0 * t)
 
-    # Build the full point list, propagating unspecified joints forward
-    all_pts: List[Dict[str, float]] = [current]
-    for wp in waypoints:
-        prev = all_pts[-1]
-        all_pts.append({j: wp.get(j, prev[j]) for j in JOINT_NAMES})
+        action = {}
+        for j in JOINT_NAMES:
+            # Quadratic Bezier formula
+            action[j] = (
+                ((1 - t_smooth) ** 2) * p0[j] +
+                2 * (1 - t_smooth) * t_smooth * p1[j] +
+                (t_smooth ** 2) * p2[j]
+            )
 
-    # Ghost points so endpoint tangents are well-defined (reflect through boundary)
-    ghost_start = {j: 2.0 * all_pts[0][j]  - all_pts[1][j]  for j in JOINT_NAMES}
-    ghost_end   = {j: 2.0 * all_pts[-1][j] - all_pts[-2][j] for j in JOINT_NAMES}
-    pts = [ghost_start] + all_pts + [ghost_end]
+        if fixed_joints:
+            action.update(fixed_joints)
 
-    # Execute each segment: pts[seg+1] → pts[seg+2], neighbours are pts[seg] and pts[seg+3]
-    for seg, duration in enumerate(durations):
-        p0, p1, p2, p3 = pts[seg], pts[seg + 1], pts[seg + 2], pts[seg + 3]
-        steps = max(2, int(duration * CONTROL_HZ))
+        robot.send_action(action)
 
-        for step in range(steps):
-            tic = time.time()
-            t   = step / (steps - 1)
-
-            action = {j: _catmull_rom(p0[j], p1[j], p2[j], p3[j], t) for j in JOINT_NAMES}
-
-            if fixed_joints:
-                action.update(fixed_joints)
-
-            robot.send_action(action)
-
-            elapsed = time.time() - tic
-            sleep_t = 1.0 / CONTROL_HZ - elapsed
-            if sleep_t > 0:
-                time.sleep(sleep_t)
+        elapsed = time.time() - tic
+        sleep_t = 1.0 / CONTROL_HZ - elapsed
+        if sleep_t > 0:
+            time.sleep(sleep_t)
 
 
 # =============================================================================
@@ -230,67 +204,46 @@ def move_to_ready(robot, task_type: str, duration: float = LERP_DURATION_LIFT) -
 
 def scripted_transport(robot, task_type: str, grasp_obs: Dict) -> None:
     """
-    Execute the deterministic pick-to-place trajectory after a confirmed grasp.
-
-    Uses spline_trajectory() (Catmull-Rom) for both the lift-and-place phase
-    and the post-drop return phase, so the arm flows through the intermediate
-    lift waypoint without decelerating to a stop at it.
-
-    Sequence
-    --------
-    Phase A — Spline (gripper locked): current pose → LIFT_OVERRIDE → place zone.
-              Velocity is continuous through the lift point — no mid-air jerk.
-    Phase B — Gripper release: smooth open over LERP_DURATION_DROP seconds.
-              (Increased from 0.1 s to avoid flinging the cube.)
-    Phase C — Settle pause: POST_DROP_PAUSE seconds for the cube to land cleanly.
-    Phase D — Spline (gripper open): current pose → LIFT_OVERRIDE → HOME_ACTION.
-
-    Args:
-        robot:      LeRobot Robot instance.
-        task_type:  "check_in" → STORAGE_PLACE; "check_out" → CHECKOUT_PLACE.
-        grasp_obs:  Observation dict captured at grasp confirmation.
-                    gripper.pos is read here and clamped to GRIPPER_TRANSPORT_MAX
-                    so a slightly-loose grasp cannot slip further during transport.
+    Execute the deterministic pick-to-place trajectory using fluid Bezier arcs.
     """
-    # --- Determine placement target ---
     place_waypoint = (
         STORAGE_PLACE.copy() if task_type == "check_in" else CHECKOUT_PLACE.copy()
     )
 
-    # Small random variation to spread placement across the zone and reduce wear
     rng = np.random.default_rng()
     for joint in ("shoulder_lift.pos", "elbow_flex.pos", "wrist_flex.pos"):
         place_waypoint[joint] += rng.uniform(-PLACE_VARIATION_DEG, PLACE_VARIATION_DEG)
 
-    # --- Clamp gripper so a partially-open VLA grasp doesn't slip open further ---
     raw_grip       = float(grasp_obs.get("gripper.pos", GRIPPER_GRASP_POS))
     gripper_closed = min(raw_grip, GRIPPER_TRANSPORT_MAX)
     transport_lock = {"gripper.pos": gripper_closed}
 
-    # ── Phase A: Spline lift → place (continuous velocity, no stop at lift point) ──
-    print("  [Transport] Phase A — Spline: lift → place zone …")
-    spline_trajectory(
+    # ── Phase A: Sweeping Arc (Lift to Place) ──
+    print("  [Transport] Phase A — Sweeping Arc to placement zone …")
+    arc_trajectory(
         robot,
-        waypoints=[LIFT_OVERRIDE, place_waypoint],
-        durations=[LERP_DURATION_LIFT, LERP_DURATION_PLACE],
+        p_mid=LIFT_OVERRIDE,
+        p_end=place_waypoint,
+        duration=(LERP_DURATION_LIFT + LERP_DURATION_PLACE) * 0.8, # Speed up slightly
         fixed_joints=transport_lock,
     )
 
-    # ── Phase B: Open gripper — smooth release ────────────────────────────────
+    # ── Phase B: Open gripper ──
     print("  [Transport] Phase B — Releasing cube …")
     obs       = robot.get_observation()
     drop_pose = {j: float(obs.get(j, place_waypoint.get(j, 0.0))) for j in JOINT_NAMES}
     drop_pose["gripper.pos"] = GRIPPER_OPEN_POS
     lerp_to_waypoint(robot, drop_pose, LERP_DURATION_DROP)
 
-    # ── Phase C: Settle pause ─────────────────────────────────────────────────
+    # ── Phase C: Settle pause ──
     print(f"  [Transport] Phase C — Settling pause ({POST_DROP_PAUSE:.2f}s) …")
     time.sleep(POST_DROP_PAUSE)
 
-    # ── Phase D: Spline lift → home (smooth exit) ──────────────────────────────
-    print("  [Transport] Phase D — Spline: lift → home …")
-    spline_trajectory(
+    # ── Phase D: Sweeping Arc (Return Home) ──
+    print("  [Transport] Phase D — Sweeping Arc to home …")
+    arc_trajectory(
         robot,
-        waypoints=[LIFT_OVERRIDE, HOME_ACTION],
-        durations=[LERP_DURATION_LIFT, LERP_DURATION_HOME],
+        p_mid=LIFT_OVERRIDE,
+        p_end=HOME_ACTION,
+        duration=(LERP_DURATION_LIFT + LERP_DURATION_HOME) * 0.8,
     )
