@@ -220,7 +220,7 @@ class GraspDetector:
             diff = cv2.absdiff(curr_gray, self.prev_gray)
             changed_pixels = np.sum(diff > WRIST_STABILITY_THR)
             total_pixels = curr_gray.size
-            if (changed_pixels / total_pixels) <= 0.45:
+            if (changed_pixels / total_pixels) <= 0.15:
                 is_stable = True
         self.prev_gray = curr_gray
 
