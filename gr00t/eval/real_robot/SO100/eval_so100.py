@@ -65,14 +65,14 @@ class EvalConfig:
     action_horizon:    int   = 16
     lang_instruction:  str   = "Check in red cube"
     play_sounds:       bool  = False
-    vla_timeout:       int   = 20    # Max seconds for the VLA grasp phase
+    vla_timeout:       int   = 15    # Max seconds for the VLA grasp phase
 
     # --- Async runner settings -----------------------------------------------
     # How many control steps to execute before triggering re-inference.
     # Lower  → more frequent inference, smoother adaptation, higher GPU load.
     # Higher → less GPU load, slightly longer coasting on a stale chunk.
     # Recommended range: 4–8 for a 16-step horizon at 30 Hz.
-    replan_every:      int   = 10
+    replan_every:      int   = 6
 
     # Temperature for TemporalEnsemble.
     # 0.0 → uniform average of all live chunks (maximum smoothing).
