@@ -84,7 +84,7 @@ def check_task_success(
     color_name: str,
     diff_threshold: int = 25,
     edge_margin: int = 3,
-    debug: bool = True,  # Set to True to save debug images
+    debug: bool = False,  # Set to True to save debug images
 ) -> bool:
     """
     Returns True when the target cube is stably placed inside zone.
