@@ -9,8 +9,8 @@ import numpy as np
 # =============================================================================
 
 STORAGE_ZONE   = (277, 168, 96, 94)
-CHECK_IN_ZONE  = (399, 100, 99, 97)
-CHECK_OUT_ZONE = (152, 103, 96, 95)
+CHECK_IN_ZONE  = (152, 103, 96, 95)
+CHECK_OUT_ZONE = (399, 100, 99, 97)
 
 # =============================================================================
 # HSV Color Ranges for Front Camera Detection
@@ -111,7 +111,7 @@ STORAGE_PLACE = {
 }
 
 CHECKOUT_PLACE = {
-    "shoulder_pan.pos":  -48.2,
+    "shoulder_pan.pos":  -50.2,
     "shoulder_lift.pos": 19.5,
     "elbow_flex.pos":   -12.1,
     "wrist_flex.pos":    72.6,
