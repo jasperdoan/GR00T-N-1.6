@@ -23,6 +23,7 @@ from constants import (
     WRIST_CONFIRM_FRAMES,
     VLA_GRASP_MIN_TIME,
     GRIPPER_OPEN_POS,
+    GRIPPER_TRANSPORT_MAX
 )
 
 
@@ -230,7 +231,7 @@ class GraspDetector:
         # --- Signal C: Gripper STRICT Check ---
         # Gripper must be physically closed. If grasp is ~15, it must be <= 20.
         gripper_pos = obs.get("gripper.pos", GRIPPER_OPEN_POS)
-        is_gripping = float(gripper_pos) <= (GRIPPER_GRASP_POS + 2.0)
+        is_gripping = float(gripper_pos) <= GRIPPER_TRANSPORT_MAX
 
         frame_success = is_stable and has_color and is_gripping
 
