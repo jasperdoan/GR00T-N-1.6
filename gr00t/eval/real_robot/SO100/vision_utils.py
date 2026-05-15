@@ -45,7 +45,7 @@ def _clean_mask(mask: np.ndarray, kernel_size: int = 5) -> np.ndarray:
     return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
 
-def _color_pixel_count(image_arr: np.ndarray, color_name: str, color_ranges: Dict, debug_save: bool = False) -> int:
+def _color_pixel_count(image_arr: np.ndarray, color_name: str, color_ranges: Dict, debug_save: bool = True) -> int:
     """Return the total number of pixels matching color_name in image_arr."""
     # 1. Safeguard: handle float vs uint8
     if image_arr.dtype != np.uint8:
@@ -84,7 +84,7 @@ def check_task_success(
     color_name: str,
     diff_threshold: int = 25,
     edge_margin: int = 3,
-    debug: bool = False,  # Set to True to save debug images
+    debug: bool = True,
 ) -> bool:
     """
     Returns True when the target cube is stably placed inside zone.
@@ -224,7 +224,7 @@ class GraspDetector:
         self.prev_gray = curr_gray
 
         # --- Signal B: Color Presence ---
-        color_px = _color_pixel_count(roi_bgr, color_name, WRIST_COLOR_RANGES, debug_save=False)
+        color_px = _color_pixel_count(roi_bgr, color_name, WRIST_COLOR_RANGES)
         has_color = color_px >= WRIST_MIN_COLOR_PX
 
         # --- Signal C: Gripper Loose Check ---
