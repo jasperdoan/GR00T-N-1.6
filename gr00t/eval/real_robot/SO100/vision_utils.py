@@ -84,12 +84,12 @@ def check_task_success(
     color_name: str,
     diff_threshold: int = 25,
     edge_margin: int = 3,
+    debug: bool = True,  # Set to True to save debug images
 ) -> bool:
     """
-    Returns True when the target cube is stably placed inside zone AND the robot
-    arm has cleared the area.
+    Returns True when the target cube is stably placed inside zone.
+    Saves 'DEBUG_success_check.jpg' for visual inspection.
     """
-    # 1. Safeguard: Ensure we are working with uint8 RGB
     def to_uint8(img):
         if img.dtype != np.uint8:
             return (img * 255).clip(0, 255).astype(np.uint8)
@@ -103,19 +103,16 @@ def check_task_success(
     base_crop = base_u8[y : y + h, x : x + w]
 
     # --- Step 1: background subtraction ---
-    # We use RGB2GRAY because the input is likely RGB
     diff      = cv2.absdiff(crop, base_crop)
-    gray_diff = cv2.cvtColor(diff, cv2.COLOR_RGB2GRAY) 
+    gray_diff = cv2.cvtColor(diff, cv2.COLOR_RGB2GRAY)
     gray_diff = cv2.GaussianBlur(gray_diff, (5, 5), 0)
     _, diff_mask = cv2.threshold(gray_diff, diff_threshold, 255, cv2.THRESH_BINARY)
 
     # --- Step 2: color mask ---
-    # FIX: Use RGB2HSV instead of BGR2HSV
     hsv        = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
     color_mask = _build_color_mask(hsv, color_name, COLOR_RANGES)
 
     # --- Step 3: intersection ---
-    # This ensures we only care about colored objects that WEREN'T there before
     final_mask = cv2.bitwise_and(color_mask, diff_mask)
     final_mask = _clean_mask(final_mask)
 
@@ -123,24 +120,61 @@ def check_task_success(
     contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     found_valid_blob = False
-    for cnt in contours:
-        if cv2.contourArea(cnt) < MIN_BLOB_AREA_PX:
-            continue
+    best_area = 0
+    
+    if debug:
+        print(f"\n--- Vision Debug [{color_name.upper()}] ---")
+        print(f"Diff mask pixels: {np.sum(diff_mask > 0)}")
+        print(f"Color mask pixels: {np.sum(color_mask > 0)}")
+        print(f"Intersection pixels: {np.sum(final_mask > 0)}")
+        print(f"Contours found: {len(contours)}")
 
+    for i, cnt in enumerate(contours):
+        area = cv2.contourArea(cnt)
         bx, by, bw, bh = cv2.boundingRect(cnt)
-
-        # The 'touches_edge' check ignores the robot arm if it's poking into the zone
+        
         touches_edge = (
             bx <= edge_margin
             or by <= edge_margin
             or (bx + bw) >= (w - edge_margin)
             or (by + bh) >= (h - edge_margin)
         )
+        
+        if debug:
+            print(f"  Contour {i}: Area={area}, TouchesEdge={touches_edge}")
 
-        if not touches_edge:
+        if area >= MIN_BLOB_AREA_PX and not touches_edge:
             found_valid_blob = True
+            best_area = area
             break
-            
+
+    # --- Step 5: Save Debug Image Mosaic ---
+    if debug:
+        # Convert masks to 3-channel BGR so we can stack them with the crops
+        # Note: we use RGB2BGR because cv2.imwrite expects BGR
+        bgr_crop = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+        bgr_base = cv2.cvtColor(base_crop, cv2.COLOR_RGB2BGR)
+        m1 = cv2.cvtColor(diff_mask, cv2.COLOR_GRAY2BGR)
+        m2 = cv2.cvtColor(color_mask, cv2.COLOR_GRAY2BGR)
+        m3 = cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR)
+        
+        # Draw the bounding box of the zone on the full frame for context
+        full_debug = cv2.cvtColor(curr_u8, cv2.COLOR_RGB2BGR)
+        cv2.rectangle(full_debug, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        
+        # Create labels
+        def add_label(img, text):
+            return cv2.putText(img.copy(), text, (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+        row1 = np.hstack([add_label(bgr_base, "Baseline"), add_label(bgr_crop, "Current")])
+        row2 = np.hstack([add_label(m1, "Diff Mask"), add_label(m2, f"{color_name} Mask")])
+        row3 = np.hstack([add_label(m3, "Final Intersect"), np.zeros_like(bgr_crop)])
+        
+        mosaic = np.vstack([row1, row2, row3])
+        cv2.imwrite("DEBUG_success_check.jpg", mosaic)
+        cv2.imwrite("DEBUG_full_frame.jpg", full_debug)
+        print(f"Debug images saved. Result: {found_valid_blob}")
+
     return found_valid_blob
 
 
