@@ -142,135 +142,19 @@ Instead of a sudden jump, we implemented a 2.0-second **Ease-In/Ease-Out (Smooth
 
 
 
-Next Phase:
+Chat: https://claude.ai/chat/1e0ac3a9-1344-4b70-b6cb-bd56f3a67c79
 
-Changing how we do things a bit: Pivoting **End-to-End Control** to **Hybrid Modular Control**. **Proposal: Transitioning to a Hybrid Modular Architecture for Increased Reliability**
+Async Double-Buffer with Temporal Ensembling
 
-Could we significantly increase task success rates by narrowing the GR00T-VLA’s responsibility to high-entropy 'Approach and Grasp' maneuvers while delegating low-entropy 'Transport and Placement' to programmatic trajectories? Currently, the model exhibits cumulative error over long horizons, leading to inconsistency during the transport phase—a portion of the task that requires high spatial precision but low visual reasoning. By treating the VLA as a 'Visual Servoing' specialist, we would leverage its ability to handle varied cube placements to achieve a secure grasp; once the gripper's state indicates a successful hold, the system would hand off control to a scripted, interpolated kinematic path (A-to-B). This approach is backed by the principle of **Dimensionality Reduction in Action Space**: by removing the transport phase from the neural network's burden, we eliminate the risk of 'model drift' during movement, ensuring that once an object is secured, the final delivery is mathematically guaranteed and executionally smooth.
+Quintic Smoothstep
 
-With this new change I want the following
+Multi-Waypoint Spline Instead of Sequential Lerps
 
-`obs["lang"] = cfg.lang_instruction ` will now only assigned the color so `obs["lang"]` is only assigned red/blue/yellow. Since the task we will be training the robot on will only be about identifying and grasping color cubes. while the lang_instruction full will still be parsed to determined whether it is a check in or check out.
+Gripper Close During Transport --> clamping it so it doesn't slip during movement
 
-The robot (SO ARM) now will call VLA to identify and grasp the appropriate color cube. The scripted part will take over by moving the arm up vertically then over to the target location, lowering it and releasing the cube, then vertically going up again (to avoid collisions). Then back to the home position in this order.
-
-Now the motion will be relatively the same, but the angle would be different because of the area. For example, from Check In to Storage. We run VLA so it go to the cube for grasping. Then once we confirmed grasp. We will take the current position (angle of all motors), and update lerp it to go vertially up (so most of the motor except for shoulder_pan.pos will change, since shoulder_pan.pos is what's keeping the arm in that area and direction). Then move shoulder_pan.pos to rotate to the storage area. Lower it back and drop something of that nature. We will have to define a specific set of waypoints. Which are below (Note that some steps and ideas are abstract and left out but the general concept and flow is the same as what we have before)
+move_to_ready should be generalized or move into constants
 
 
-Lets say: Check in red cube
-
-obs["lang"] should only be "red"
-Task type is check in from "Check in" so from **Check-in Area** to the **Storage Area**
-
-1. move to home
-2. snapshot
-3. run VLA to identify and grasp the red cube (inference)
-    3.5 detection := reached + grasped (to be discussed later), break and switch to scripted motion
-
-From current position from VLA / GR00T after confirmed grasped
-```
-{
-    "shoulder_pan.pos": __,
-    "shoulder_lift.pos": -__,
-    "elbow_flex.pos": __,
-    "wrist_flex.pos": __,
-    "wrist_roll.pos": __,
-    "gripper.pos": __
-}
-```
-lerp to "vertically up/picking up" position
-```
-{
-    "shoulder_pan.pos": __,     <-- Keep the same
-    "shoulder_lift.pos": 15.3,
-    "elbow_flex.pos": -3.4,
-    "wrist_flex.pos": 71.1,
-    "wrist_roll.pos": __, <-- Keep the same
-    "gripper.pos": __      <-- Keep the same
-}
-```
-lerp to storage zone > (-1 to 1 degrees) random add for variation
-```
-{
-    "shoulder_pan.pos": 0,
-    "shoulder_lift.pos": 19.5,
-    "elbow_flex.pos": -12.1,
-    "wrist_flex.pos": 72.6,
-    "wrist_roll.pos": 63.8,
-    "gripper.pos": __      <-- Keep the same
-}
-```
-drop > (-1 to 1 degrees) random add for variation
-```
-{
-    "shoulder_pan.pos": 0,
-    "shoulder_lift.pos": 19.5,
-    "elbow_flex.pos": -12.1,
-    "wrist_flex.pos": 72.6,
-    "wrist_roll.pos": 63.8,
-    "gripper.pos": 40
-}
-```
-Wait for a tiny bit / pause for like 1 second
-then lerp back to home position ...
-
-The lerping between waypoints should be smooth and immediate.
-
-
-
-And likewise for check out area it would be shoulder_pan.pos = -48.2
-
-
-Now this begs the question. How do we detect when the robot has successfully grasped the cube? This is a hard one because we are unsure of the exact moment when it has reached the cube and has a secure grip onto it. My only thought is to similar to how we currently do detection, we can have a function to check along with something else. Like maybe if gripper.pos around ~16.5 +/- 1.0 degrees it is in a closed position and probably has grasped it. We would want to check the wrist camera and do some kind of confirmation detection to interupt so we can move to the scripted part. Open to ideas.
-
-
-Also it would be helpful if we make a different file for organization purposes to eval is kept nice, straight forward and clean. Maybe within the same folder:
-gr00t/eval/real_robot/SO100/eval_so100.py
-
-
-
-
-
-
-
-def _build_color_mask(hsv: np.ndarray, color_name: str, color_ranges: Dict) -> np.ndarray:
-    """Return a binary mask of pixels matching the named color from the provided dict."""
-    h, w = hsv.shape[:2]
-    mask = np.zeros((h, w), dtype=np.uint8)
-    for lower, upper in color_ranges.get(color_name,[]):
-        mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lower, upper))
-    return mask
-
-
-def _clean_mask(mask: np.ndarray, kernel_size: int = 5) -> np.ndarray:
-    """Remove small noise blobs with a morphological open."""
-    kernel = np.ones((kernel_size, kernel_size), np.uint8)
-    return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-
-
-def _color_pixel_count(image_arr: np.ndarray, color_name: str, color_ranges: Dict, debug_save: bool = False) -> int:
-    """Return the total number of pixels matching color_name in image_arr."""
-    # 1. Safeguard: handle float vs uint8
-    if image_arr.dtype != np.uint8:
-        img_uint8 = (image_arr * 255).clip(0, 255).astype(np.uint8)
-    else:
-        img_uint8 = image_arr.copy()
-
-    # 2. CHANGE THIS LINE: Use RGB2HSV because LeRobot/Camera is likely RGB
-    hsv = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2HSV)
-    
-    # 3. Build and clean mask
-    mask = _build_color_mask(hsv, color_name, color_ranges)
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    
-    # -------------------------------------------------------------------------
-    # DEBUG: Correct the image for saving so it looks normal on your PC
-    # -------------------------------------------------------------------------
-    if debug_save:
-        # To save an RGB image correctly with OpenCV, we must swap it back to BGR
-        save_ready = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2BGR)
-        cv2.imwrite("DEBUG_wrist_crop_color.jpg", save_ready)
-        cv2.imwrite("DEBUG_wrist_mask.jpg", mask)
-        
-    return int(np.sum(mask > 0))
+To be added later:
+- Zone Quadrant Placement
+- Retry Loop on Grasp Failure - Right now a timeout just returns. A retry loop would be more robust

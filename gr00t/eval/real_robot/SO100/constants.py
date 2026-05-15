@@ -33,7 +33,7 @@ COLOR_RANGES = {
 MIN_BLOB_AREA_PX = 100
 
 # =============================================================================
-# Wrist Camera Grasp Verification Constants (NEW)
+# Wrist Camera Grasp Verification Constants
 # =============================================================================
 
 # Bounding box between gripper fingers from calibration
@@ -53,10 +53,10 @@ WRIST_COLOR_RANGES = {
     ],
 }
 
-WRIST_MIN_COLOR_PX   = 5000      # Min pixels matching target color inside ROI
-WRIST_STABILITY_THR  = 6.0     # Diff threshold; any pixel changing > X is "moving"
+WRIST_MIN_COLOR_PX   = 5000   # Min pixels matching target color inside ROI
+WRIST_STABILITY_THR  = 6.0    # Diff threshold; any pixel changing > X is "moving"
 WRIST_CONFIRM_FRAMES = 3      # Number of consecutive true frames required
-VLA_GRASP_MIN_TIME   = 1.0     # Number of seconds the VLA runs before checking for grasps
+VLA_GRASP_MIN_TIME   = 1.0    # Seconds the VLA runs before checking for grasps
 
 # =============================================================================
 # Robot Joint Names (ordered, matches state/action arrays)
@@ -92,6 +92,32 @@ GRIPPER_OPEN_POS    = 40.0   # degrees — fully open
 GRIPPER_GRASP_POS   = 15.0   # degrees — expected closed-on-cube position
 GRIPPER_GRASP_TOL   = 1.5    # ± tolerance in degrees
 
+# Maximum gripper position allowed during transport.
+# Clamps the locked value so a slightly-open grasp (e.g. 22°) can't slip further.
+GRIPPER_TRANSPORT_MAX = GRIPPER_GRASP_POS + 2.0
+
+# =============================================================================
+# Task-Specific Ready / Approach Positions
+# =============================================================================
+# Keyed by task_type string. Each dict is a partial joint map — joints absent
+# here are filled from current state in move_to_ready(). Gripper is always
+# forced open (GRIPPER_OPEN_POS) by move_to_ready() independently.
+
+READY_POSITIONS = {
+    "check_in": {
+        "shoulder_pan.pos":   36.2,
+        "shoulder_lift.pos": -21.1,
+        "elbow_flex.pos":     27.1,
+        "wrist_flex.pos":     78.4,
+    },
+    "check_out": {
+        "shoulder_pan.pos":    0.0,
+        "shoulder_lift.pos": -21.1,
+        "elbow_flex.pos":     27.1,
+        "wrist_flex.pos":     78.4,
+    },
+}
+
 # =============================================================================
 # Scripted Transport Waypoints
 # =============================================================================
@@ -119,9 +145,9 @@ CHECKOUT_PLACE = {
 }
 
 PLACE_VARIATION_DEG = 2.0   # uniform random in [-X, +X] degrees per joint
-POST_DROP_PAUSE = 0.25      # Pause duration after dropping the cube (seconds)
+POST_DROP_PAUSE     = 0.35  # pause after dropping cube (seconds) — increased for cleaner settle
 
 LERP_DURATION_LIFT  = 1.0
 LERP_DURATION_PLACE = 1.0
-LERP_DURATION_DROP  = 0.1
+LERP_DURATION_DROP  = 0.4   # increased from 0.1 — prevents flinging the cube on release
 LERP_DURATION_HOME  = 1.0

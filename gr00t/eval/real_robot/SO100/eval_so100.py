@@ -11,6 +11,13 @@ The language instruction passed to GR00T contains only the target color
 (e.g. "red"), not the full instruction. Task routing (check-in vs check-out)
 is handled here in the orchestration layer.
 
+VLA smoothness
+--------------
+  Inference runs in a background thread (AsyncPolicyRunner) so the control
+  loop never stalls waiting for the GPU.  Overlapping action chunks are blended
+  via TemporalEnsemble so the hand-off between chunks is invisible to the robot.
+  Together these eliminate the burst-pause-burst pattern of naive chunk execution.
+
 Usage
 -----
   python eval_so100.py --robot <cfg> --lang_instruction "Check in red cube"
@@ -40,10 +47,11 @@ from lerobot.robots import so_follower as so100_follower  # noqa: F401
 from lerobot.robots import so_follower as so101_follower  # noqa: F401
 from lerobot.utils.utils import init_logging, log_say
 
-from adapter      import So100Adapter
-from constants    import CHECK_OUT_ZONE, STORAGE_ZONE
-from motion       import move_to_home, scripted_transport, move_to_ready
-from vision_utils import GraspDetector, check_task_success
+from adapter        import So100Adapter
+from constants      import CHECK_OUT_ZONE, STORAGE_ZONE
+from motion         import move_to_home, move_to_ready, scripted_transport
+from policy_runner  import AsyncPolicyRunner
+from vision_utils   import GraspDetector, check_task_success
 
 # =============================================================================
 # Configuration
@@ -52,12 +60,25 @@ from vision_utils import GraspDetector, check_task_success
 @dataclass
 class EvalConfig:
     robot:             RobotConfig
-    policy_host:       str  = "localhost"
-    policy_port:       int  = 5555
-    action_horizon:    int  = 16
-    lang_instruction:  str  = "Check in red cube"
-    play_sounds:       bool = False
-    vla_timeout:       int  = 20    # Max seconds for the VLA grasp phase
+    policy_host:       str   = "localhost"
+    policy_port:       int   = 5555
+    action_horizon:    int   = 16
+    lang_instruction:  str   = "Check in red cube"
+    play_sounds:       bool  = False
+    vla_timeout:       int   = 20    # Max seconds for the VLA grasp phase
+
+    # --- Async runner settings -----------------------------------------------
+    # How many control steps to execute before triggering re-inference.
+    # Lower  → more frequent inference, smoother adaptation, higher GPU load.
+    # Higher → less GPU load, slightly longer coasting on a stale chunk.
+    # Recommended range: 4–8 for a 16-step horizon at 30 Hz.
+    replan_every:      int   = 8
+
+    # Temperature for TemporalEnsemble.
+    # 0.0 → uniform average of all live chunks (maximum smoothing).
+    # 0.1 → moderate bias to the newest chunk (recommended).
+    # 1.0 → nearly always takes the newest chunk (minimal blending).
+    ensemble_temp:     float = 0.1
 
 
 # =============================================================================
@@ -108,7 +129,14 @@ def eval(cfg: EvalConfig):
     robot         = make_robot_from_config(cfg.robot)
     robot.connect()
     policy_client = PolicyClient(host=cfg.policy_host, port=cfg.policy_port)
-    policy        = So100Adapter(policy_client)
+    adapter       = So100Adapter(policy_client)
+
+    # Build the async runner — inference will overlap with robot execution
+    runner = AsyncPolicyRunner(
+        policy        = adapter,
+        replan_every  = cfg.replan_every,
+        ensemble_temp = cfg.ensemble_temp,
+    )
 
     log_say("Hardware and policy initialized.", cfg.play_sounds)
 
@@ -123,39 +151,49 @@ def eval(cfg: EvalConfig):
     # ── Phase 1: VLA — approach and grasp ────────────────────────────────────
     print("\n─── Phase 1: VLA Grasp ─────────────────────────────────────────")
     log_say(f"Searching for {color} cube.", cfg.play_sounds)
-    print(">>> Monitoring wrist camera (VLA_GRASP_MIN_TIME gate initiated) ...")
+    print(
+        f">>> Running async inference "
+        f"(replan_every={cfg.replan_every}, ensemble_temp={cfg.ensemble_temp}) …"
+    )
 
-    grasp_obs: Optional[dict] = None
-    start_time = time.time()
-    
-    # Initialize our sequential confirmation detector
-    grasp_detector = GraspDetector()
+    grasp_obs:      Optional[dict] = None
+    start_time      = time.time()
+    grasp_detector  = GraspDetector()
 
     while True:
-        # Failsafe timeout
+        # ── Failsafe timeout ────────────────────────────────────────────────
         if time.time() - start_time > cfg.vla_timeout:
             print("\n[TIMEOUT] VLA grasp phase exceeded limit. Aborting.")
             move_to_home(robot)
+            runner.reset()
             return
 
-        obs = robot.get_observation()
-        obs["lang"] = color   # VLA sees the color string only
+        tic = time.time()
 
-        # Pass frame into the detector state machine
+        obs = robot.get_observation()
+        obs["lang"] = color
+
+        # ── Grasp detection ─────────────────────────────────────────────────
         if grasp_detector.update(obs, color):
             print(f"\n✅ [GRASP CONFIRMED] {color.upper()} cube secured!")
             grasp_obs = obs
             break
 
-        # Run one VLA inference step
-        actions = policy.get_action_chunk(obs)
+        # ── Async VLA step ──────────────────────────────────────────────────
+        # runner.step() returns the temporally-ensembled action for this tick.
+        # On the very first call it blocks briefly for the initial inference;
+        # all subsequent calls return immediately from the ensemble buffer.
+        action = runner.step(obs)
+        if action is not None:
+            robot.send_action(action)
 
-        for action_dict in actions[: cfg.action_horizon]:
-            tic = time.time()
-            robot.send_action(action_dict)
-            elapsed = time.time() - tic
-            if elapsed < 1.0 / 30:
-                time.sleep(1.0 / 30 - elapsed)
+        # ── Hold 30 Hz regardless of inference time ─────────────────────────
+        elapsed = time.time() - tic
+        sleep_t = 1.0 / 30 - elapsed
+        if sleep_t > 0:
+            time.sleep(sleep_t)
+
+    runner.reset()   # clear stale chunk history before scripted phase
 
     # ── Phase 2: Scripted transport ───────────────────────────────────────────
     print("\n─── Phase 2: Scripted Transport ────────────────────────────────")
