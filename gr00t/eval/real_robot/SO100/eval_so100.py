@@ -72,7 +72,7 @@ class EvalConfig:
     # Lower  → more frequent inference, smoother adaptation, higher GPU load.
     # Higher → less GPU load, slightly longer coasting on a stale chunk.
     # Recommended range: 4–8 for a 16-step horizon at 30 Hz.
-    replan_every:      int   = 12
+    replan_every:      int   = 10
 
     # Temperature for TemporalEnsemble.
     # 0.0 → uniform average of all live chunks (maximum smoothing).
