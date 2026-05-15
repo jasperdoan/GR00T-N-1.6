@@ -6,6 +6,83 @@ State-of-the-art Action Chunking execution.
 2. Fast-forwards new chunks based on the exact step the thread started.
 3. Exponentially averages overlapping chunks (Temporal Ensembling) to smooth 
    out VLA noise and create flawless transitions between trajectories.
+
+
+=======================================================================================================================
+THE TIME-ALIGNED TEMPORAL ENSEMBLE TIMELINE (Steps 0 - 24)
+=======================================================================================================================
+
+LEGEND:
+[*] = Policy Inference Requested (Picture Taken)
+[#] = GPU Processing (Inference Delay: 2 steps)
+[A][B][C][D] = Chunks being executed
+[---] = Actions skipped (Time-Alignment) to match the current global step.
+
+GLOBAL | VLA ACTIVITY    | CHUNK A         | CHUNK B         | CHUNK C         | CHUNK D         | VOTING POWER (%)
+STEP   | (Inference)     | (Capture S:0)   | (Capture S:6)   | (Capture S:12)  | (Capture S:18)  | (Weighted Average)
+-------|-----------------|-----------------|-----------------|-----------------|-----------------|-------------------
+0      | * Request A     | [WAITING...]    |                 |                 |                 | (Bootstrapping)
+1      | # Thinking...   | [WAITING...]    |                 |                 |                 | (Bootstrapping)
+2      | A Arrives!      | [---][---][A2]  |                 |                 |                 | 100% A
+3      |                 | [A3]            |                 |                 |                 | 100% A
+4      |                 | [A4]            |                 |                 |                 | 100% A
+5      |                 | [A5]            |                 |                 |                 | 100% A
+-------|-----------------|-----------------|-----------------|-----------------|-----------------|-------------------
+6      | * Request B     | [A6]            | [WAITING...]    |                 |                 | 100% A
+7      | # Thinking...   | [A7]            | [WAITING...]    |                 |                 | 100% A
+8      | B Arrives!      | [A8]            | [---][---][B2]  |                 |                 | 52% B (New), 48% A
+9      |                 | [A9]            | [B3]            |                 |                 | 52% B, 48% A
+10     |                 | [A10]           | [B4]            |                 |                 | 52% B, 48% A
+11     |                 | [A11]           | [B5]            |                 |                 | 52% B, 48% A
+-------|-----------------|-----------------|-----------------|-----------------|-----------------|-------------------
+12     | * Request C     | [A12]           | [B6]            | [WAITING...]    |                 | 52% B, 48% A
+13     | # Thinking...   | [A13]           | [B7]            | [WAITING...]    |                 | 52% B, 48% A
+14     | C Arrives!      | [A14]           | [B8]            | [---][---][C2]  |                 | 37% C, 33% B, 30% A
+15     |                 | [A15]           | [B9]            | [C3]            |                 | 37% C, 33% B, 30% A
+16     | [A EXPIRES]     |                 | [B10]           | [C4]            |                 | 52% C, 48% B
+17     |                 |                 | [B11]           | [C5]            |                 | 52% C, 48% B
+-------|-----------------|-----------------|-----------------|-----------------|-----------------|-------------------
+18     | * Request D     |                 | [B12]           | [C6]            | [WAITING...]    | 52% C, 48% B
+19     | # Thinking...   |                 | [B13]           | [C7]            | [WAITING...]    | 52% C, 48% B
+20     | D Arrives!      |                 | [B14]           | [C8]            | [---][---][D2]  | 37% D, 33% C, 30% B
+21     |                 |                 | [B15]           | [C9]            | [D3]            | 37% D, 33% C, 30% B
+22     | [B EXPIRES]     |                 |                 | [C10]           | [D4]            | 52% D, 48% C
+23     |                 |                 |                 | [C11]           | [D5]            | 52% D, 48% C
+24     | * Request E     |                 |                 | [C12]           | [D6]            | 52% D, 48% C
+-------|-----------------|-----------------|-----------------|-----------------|-----------------|-------------------
+
+=======================================================================================================================
+VOTING POWER BREAKDOWN (The "Why it works")
+=======================================================================================================================
+
+1. THE MERGE (Step 8): 
+   Chunk B arrives. It is "Age 0" (Weight: 1.0). Chunk A is "Age 1" (Weight: 0.90).
+   Total Weight: 1.90.
+   - Chunk B (Newest) gets 1.0 / 1.90 = 52.6% power.
+   - Chunk A (Oldest) gets 0.9 / 1.90 = 47.4% power.
+   The robot is now 52% controlled by Chunk B, but A is still "smoothing" the transition.
+
+2. THE 3-WAY BLEND (Step 14):
+   Chunk C arrives. 
+   - Chunk C (Age 0): 1.00 weight -> 36.7% Power
+   - Chunk B (Age 1): 0.90 weight -> 33.2% Power
+   - Chunk A (Age 2): 0.82 weight -> 30.1% Power
+   The robot is now averaging three different opinions! If Chunk C is slightly "noisy," the combined
+   momentum of A and B (63% total) stabilizes the arm while C slowly pulls it toward the new goal.
+
+3. THE SKIPPING (Time-Alignment):
+   Notice Step 14. Chunk C was requested at Step 12. 
+   When C arrives, it contains actions [C0, C1, C2...].
+   If we played [C0] at Step 14, we would be playing an action meant for Step 12.
+   The code skips C0 and C1, and starts blending at [C2]. 
+   Because [A14], [B8], and [C2] all represent the EXACT same point in the future (Step 14),
+   the robot stays perfectly on the timeline.
+
+4. THE TEMPERATURE EFFECT:
+   - If Temperature = 0.0: Every active chunk gets exactly equal power (33/33/33).
+   - If Temperature = 0.1: Newest chunk is slightly stronger (37/33/30). [CURRENT SETTING]
+   - If Temperature = 0.5: Newest chunk dominates heavily (58/35/7). Use this if you want maximum reactivity.
+
 """
 
 import threading
