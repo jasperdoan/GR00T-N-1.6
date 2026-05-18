@@ -48,7 +48,7 @@ from lerobot.robots import so_follower as so101_follower  # noqa: F401
 from lerobot.utils.utils import init_logging, log_say
 
 from adapter        import So100Adapter
-from constants      import CHECK_OUT_ZONE, STORAGE_ZONE
+from constants      import CHECK_OUT_ZONE, STORAGE_ZONE, KNOWN_OBJECTS
 from motion         import move_to_home, move_to_ready, scripted_transport
 from policy_runner  import AsyncPolicyRunner
 from vision_utils   import GraspDetector, check_task_success
@@ -87,7 +87,7 @@ class EvalConfig:
 
 def parse_instruction(instruction: str):
     """
-    Parse the free-text instruction into (task_type, color, target_zone).
+    Parse the free-text instruction into (task_type, target_object, target_zone).
     """
     lower = instruction.lower()
 
@@ -98,15 +98,19 @@ def parse_instruction(instruction: str):
         task_type   = "check_in"
         target_zone = STORAGE_ZONE
 
-    if "blue" in lower:
-        color = "blue"
-    elif "yellow" in lower:
-        color = "yellow"
-    else:
-        color = "red"
+    target_object = None
+    for obj in KNOWN_OBJECTS:
+        if obj in lower:
+            target_object = obj
+            break
+            
+    if target_object is None:
+        raise ValueError(
+            f"Could not find a known object in the instruction: '{instruction}'. "
+            f"Known objects are: {KNOWN_OBJECTS}"
+        )
 
-    return task_type, color, target_zone
-
+    return task_type, target_object, target_zone
 
 # =============================================================================
 # Main Evaluation Loop
@@ -118,12 +122,12 @@ def eval(cfg: EvalConfig):
     logging.info(pformat(asdict(cfg)))
 
     # ── Parse instruction ────────────────────────────────────────────────────
-    task_type, color, target_zone = parse_instruction(cfg.lang_instruction)
+    task_type, target_object, target_zone = parse_instruction(cfg.lang_instruction)
 
-    print(f"\n[PARSER] Instruction : {cfg.lang_instruction}")
-    print(f"[PARSER] Task type   : {task_type}")
-    print(f"[PARSER] Target color: {color}")
-    print(f"[PARSER] Target zone : {target_zone}\n")
+    print(f"\n[PARSER] Instruction   : {cfg.lang_instruction}")
+    print(f"[PARSER] Task type     : {task_type}")
+    print(f"[PARSER] Target object : {target_object}")
+    print(f"[PARSER] Target zone   : {target_zone}\n")
 
     # ── Initialise hardware and policy ───────────────────────────────────────
     robot         = make_robot_from_config(cfg.robot)
@@ -145,12 +149,14 @@ def eval(cfg: EvalConfig):
     time.sleep(0.1)   # let camera auto-exposure settle
     move_to_ready(robot, task_type)
 
-    print(">>> Taking baseline snapshot of workspace …")
-    baseline_img = robot.get_observation()["front"]
+    print(">>> Taking baseline snapshots of workspace and empty gripper …")
+    baseline_obs = robot.get_observation()
+    baseline_img = baseline_obs["front"]
+    baseline_wrist = baseline_obs["wrist"]
 
     # ── Phase 1: VLA — approach and grasp ────────────────────────────────────
     print("\n─── Phase 1: VLA Grasp ─────────────────────────────────────────")
-    log_say(f"Searching for {color} cube.", cfg.play_sounds)
+    log_say(f"Searching for {target_object}.", cfg.play_sounds)
     print(
         f">>> Running async inference "
         f"(replan_every={cfg.replan_every}, ensemble_temp={cfg.ensemble_temp}) …"
@@ -158,7 +164,8 @@ def eval(cfg: EvalConfig):
 
     grasp_obs:      Optional[dict] = None
     start_time      = time.time()
-    grasp_detector  = GraspDetector()
+    # Pass the empty wrist image to the detector!
+    grasp_detector  = GraspDetector(baseline_wrist_img=baseline_wrist)
 
     while True:
         # ── Failsafe timeout ────────────────────────────────────────────────
@@ -171,11 +178,11 @@ def eval(cfg: EvalConfig):
         tic = time.time()
 
         obs = robot.get_observation()
-        obs["lang"] = color
+        obs["lang"] = target_object  # <-- Passing the exact object string to VLA
 
         # ── Grasp detection ─────────────────────────────────────────────────
-        if grasp_detector.update(obs, color):
-            print(f"\n✅ [GRASP CONFIRMED] {color.upper()} cube secured!")
+        if grasp_detector.update(obs):  # <-- Removed color dependency
+            print(f"\n✅ [GRASP CONFIRMED] {target_object.upper()} secured!")
             grasp_obs = obs
             break
 
@@ -205,14 +212,14 @@ def eval(cfg: EvalConfig):
     time.sleep(0.3)   # let the scene settle before checking
     final_obs = robot.get_observation()
     success   = check_task_success(
-        final_obs["front"], baseline_img, target_zone, color
+        final_obs["front"], baseline_img, target_zone
     )
 
     if success:
-        print(f"\n🎉 [SUCCESS] {color.upper()} cube confirmed in target zone.")
+        print(f"\n🎉 [SUCCESS] {target_object.upper()} confirmed in target zone.")
         log_say("Task complete.", cfg.play_sounds)
     else:
-        print(f"\n⚠️  [WARN] Cube not detected in target zone after placement.")
+        print(f"\n⚠️  [WARN] Object not detected in target zone after placement.")
         log_say("Placement could not be confirmed.", cfg.play_sounds)
 
     print("\n>>> Evaluation complete. System shutting down cleanly.")

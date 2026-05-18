@@ -10,7 +10,14 @@ lerobot-teleoperate \
     --teleop.type=so101_leader \
     --teleop.port=/dev/ttyACM1 \
     --teleop.id=leader_arm \
-    --display_data=true
+waypoint = {
+    "shoulder_pan.pos":   -3.271,
+    "shoulder_lift.pos":   12.028,
+    "elbow_flex.pos":  -20.273,
+    "wrist_flex.pos":   80.452,
+    "wrist_roll.pos":   45.690,
+    "gripper.pos":   24.119,
+}    --display_data=true
 
 
 
@@ -43,7 +50,21 @@ This document serves as a comprehensive development log for the **GR00T SO100 Au
 ---
 
 # Project Report: Autonomous Task Termination for GR00T-VLA
-
+waypoint = {
+    "shoulder_pan.pos":   -3.271,
+    "shoulder_lift.pos":   12.028,
+    "elbow_flex.pos":  -20.273,
+    "wrist_flex.pos":   80.452,
+    "wrist_roll.pos":   45.690,
+    "gripper.pos":   24.119,
+waypoint = {
+    "shoulder_pan.pos":   -3.271,
+    "shoulder_lift.pos":   12.028,
+    "elbow_flex.pos":  -20.273,
+    "wrist_flex.pos":   80.452,
+    "wrist_roll.pos":   45.690,
+    "gripper.pos":   24.119,
+}}
 ## 1. Problem Statement: The "Infinite Loop" Challenge
 **The Context:** We are running a GR00T policy (VLA model) using a TensorRT-accelerated DiT (Diffusion Transformer) head to control an SO100 robot arm.
 **The Issue:** Like most diffusion-based policies, GR00T is trained to continuously predict the next action chunk. It lacks a built-in "End of Task" signal. Once the robot finishes a task (e.g., placing a cube), the model continues to run, causing the robot to:
@@ -82,7 +103,14 @@ To enable autonomous stopping, we had to define what "Success" looks like to a c
 *   **Check-in Zone:** `(399, 100, 99, 97)`
 *   **Check-out Zone:** `(152, 103, 96, 95)`
 
-### **Color Signatures (Target HSV)**
+waypoint = {
+    "shoulder_pan.pos":   -3.271,
+    "shoulder_lift.pos":   12.028,
+    "elbow_flex.pos":  -20.273,
+    "wrist_flex.pos":   80.452,
+    "wrist_roll.pos":   45.690,
+    "gripper.pos":   24.119,
+}### **Color Signatures (Target HSV)**
 *   **Red:** `[177, 20, 214]` (Pinkish-red)
 *   **Blue:** `[96, 169, 13]` (Blue)
 *   **Yellow:** `[33, 90, 168]` (Yellow-green)
@@ -118,7 +146,21 @@ HOME_ACTION = {
 **The Solution: Smoothstep Interpolation**
 Instead of a sudden jump, we implemented a 2.0-second **Ease-In/Ease-Out (Smoothstep)** trajectory:
 1.  **Read:** Get current joint states via `robot.get_observation()`.
-2.  **Lerp:** Linearly interpolate from `current` to `home`.
+waypoint = {
+    "shoulder_pan.pos":   -3.271,
+    "shoulder_lift.pos":   12.028,
+    "elbow_flex.pos":  -20.273,
+    "wrist_flex.pos":   80.452,
+    "wrist_roll.pos":   45.690,
+    "gripper.pos":   24.119,
+waypoint = {
+    "shoulder_pan.pos":   -3.271,
+    "shoulder_lift.pos":   12.028,
+    "elbow_flex.pos":  -20.273,
+    "wrist_flex.pos":   80.452,
+    "wrist_roll.pos":   45.690,
+    "gripper.pos":   24.119,
+}}2.  **Lerp:** Linearly interpolate from `current` to `home`.
 3.  **Smooth:** Apply a mathematical curve ($3t^2 - 2t^3$) so the motion starts and ends gently.
 
 ---
@@ -142,19 +184,72 @@ Instead of a sudden jump, we implemented a 2.0-second **Ease-In/Ease-Out (Smooth
 
 
 
-Chat: https://claude.ai/chat/1e0ac3a9-1344-4b70-b6cb-bd56f3a67c79
-
-Async Double-Buffer with Temporal Ensembling
-
-Quintic Smoothstep
-
-Multi-Waypoint Spline Instead of Sequential Lerps
-
-Gripper Close During Transport --> clamping it so it doesn't slip during movement
-
-move_to_ready should be generalized or move into constants
 
 
-To be added later:
+
+
+
+
+
+Current status and update after some iteration on my end
+
+
+Storage
+
+BL
+ 
+waypoint = {
+    "shoulder_pan.pos":    1.615,
+    "shoulder_lift.pos":   10.220,
+    "elbow_flex.pos":   -8.064,
+    "wrist_flex.pos":   68.587,
+    "wrist_roll.pos":   45.690,
+}
+
+
+BR
+
+waypoint = {
+    "shoulder_pan.pos":   -7.909,
+    "shoulder_lift.pos":   10.220,
+    "elbow_flex.pos":   -8.064,
+    "wrist_flex.pos":   68.587,
+    "wrist_roll.pos":   45.690,
+}
+
+TL
+
+waypoint = {
+    "shoulder_pan.pos":    2.774,
+    "shoulder_lift.pos":    5.818,
+    "elbow_flex.pos":   -6.606,
+    "wrist_flex.pos":   86.513,
+    "wrist_roll.pos":   45.641,
+}
+
+TR
+
+waypoint = {
+    "shoulder_pan.pos":  -10.973,
+    "shoulder_lift.pos":    5.818,
+    "elbow_flex.pos":   -6.606,
+    "wrist_flex.pos":   86.513,
+    "wrist_roll.pos":   45.641,
+}
+
+Middle
+
+waypoint = {
+    "shoulder_pan.pos":   -3.271,
+    "shoulder_lift.pos":   12.028,
+    "elbow_flex.pos":  -20.273,
+    "wrist_flex.pos":   80.452,
+    "wrist_roll.pos":   45.690,
+}
+
+
+
+
+Want to add the following:
 - Zone Quadrant Placement
 - Retry Loop on Grasp Failure - Right now a timeout just returns. A retry loop would be more robust

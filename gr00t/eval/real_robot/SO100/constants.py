@@ -13,23 +13,25 @@ CHECK_IN_ZONE  = (152, 103, 96, 95)
 CHECK_OUT_ZONE = (399, 100, 99, 97)
 
 # =============================================================================
-# HSV Color Ranges for Front Camera Detection
+# Language & Object Definitions
 # =============================================================================
 
-COLOR_RANGES = {
-    "red": [
-        (np.array([0,   10, 100]), np.array([10,  255, 255])),
-        (np.array([165, 10, 100]), np.array([180, 255, 255])),
-    ],
-    "blue": [
-        (np.array([80,  50,  0]), np.array([120, 255, 255])),
-    ],
-    "yellow": [
-        (np.array([20,  50, 50]), np.array([45,  255, 255])),
-    ],
-}
+# Add any new objects you train here! Must be lowercase.
+KNOWN_OBJECTS = [
+    "red cube",
+    "blue cube",
+    "yellow cube",
+    "pink prism",
+    "orange sphere",
+    "dice",
+    "number 10 block"
+]
 
-# Minimum pixel area for a detected blob to be considered a real cube (not noise)
+# =============================================================================
+# Front Camera Task Success Verification Constants
+# =============================================================================
+
+# Minimum pixel area for a detected blob to be considered a real object
 MIN_BLOB_AREA_PX = 100
 
 # =============================================================================
@@ -39,21 +41,8 @@ MIN_BLOB_AREA_PX = 100
 # Bounding box between gripper fingers from calibration
 WRIST_GRASP_ROI = (276, 293, 193, 186)
 
-# Calibrated HSV Ranges for the Wrist Camera
-WRIST_COLOR_RANGES = {
-    "red": [
-        (np.array([165, 80, 120]), np.array([180, 255, 255])),
-        (np.array([0,   80, 120]), np.array([10,  255, 255])),
-    ],
-    "blue": [
-        (np.array([90, 40, 120]), np.array([115, 255, 255])),
-    ],
-    "yellow": [
-        (np.array([10, 15, 150]), np.array([35, 255, 255])),
-    ],
-}
-
-WRIST_MIN_COLOR_PX   = 5000   # Min pixels matching target color inside ROI
+WRIST_PRESENCE_THR   = 30     # Pixel difference intensity to count as "changed" from baseline
+WRIST_MIN_PRESENCE_PX= 1500   # Min changed pixels to confirm an object is in the gripper
 WRIST_STABILITY_THR  = 6.0    # Diff threshold; any pixel changing > X is "moving"
 WRIST_CONFIRM_FRAMES = 3      # Number of consecutive true frames required
 VLA_GRASP_MIN_TIME   = 1.0    # Seconds the VLA runs before checking for grasps
@@ -90,11 +79,10 @@ HOME_ACTION = {
 
 GRIPPER_OPEN_POS    = 40.0   # degrees — fully open
 GRIPPER_GRASP_POS   = 15.0   # degrees — expected closed-on-cube position
-GRIPPER_GRASP_TOL   = 1.5    # ± tolerance in degrees
 
 # Maximum gripper position allowed during transport.
 # Clamps the locked value so a slightly-open grasp (e.g. 22°) can't slip further.
-GRIPPER_TRANSPORT_MAX = GRIPPER_GRASP_POS + 3.0
+GRIPPER_TRANSPORT_MAX = GRIPPER_GRASP_POS + 4.0
 
 # =============================================================================
 # Task-Specific Ready / Approach Positions

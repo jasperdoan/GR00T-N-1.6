@@ -62,7 +62,7 @@ class So100Adapter:
                 "gripper":    state[5:6],
             },
             "language": {
-                self.LANGUAGE_KEY: obs["lang"],  # color string only ("red" / "blue" / "yellow")
+                self.LANGUAGE_KEY: obs["lang"],  # canonical object string ("dice", "pink prism")
             },
         }
 
