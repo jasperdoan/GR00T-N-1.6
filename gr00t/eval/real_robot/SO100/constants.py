@@ -82,7 +82,7 @@ GRIPPER_GRASP_POS   = 15.0   # degrees — expected closed-on-cube position
 
 # Maximum gripper position allowed during transport.
 # Clamps the locked value so a slightly-open grasp (e.g. 22°) can't slip further.
-GRIPPER_TRANSPORT_MAX = GRIPPER_GRASP_POS + 4.0
+GRIPPER_TRANSPORT_MAX = GRIPPER_GRASP_POS + 5.0
 
 # =============================================================================
 # Task-Specific Ready / Approach Positions
