@@ -45,7 +45,7 @@ def check_task_success(
     zone: Tuple[int, int, int, int],
     diff_threshold: int = 25,
     edge_margin: int = 3,
-    debug: bool = True,
+    debug: bool = False,
 ) -> bool:
     """
     Returns True if a new object of sufficient size has appeared in the zone.
@@ -76,7 +76,7 @@ def check_task_success(
 
     found_valid_blob = False
     
-    if debug:
+    if True:
         print(f"\n--- Vision Debug [Presence Check] ---")
         print(f"Diff mask pixels: {np.sum(final_mask > 0)}")
         print(f"Contours found: {len(contours)}")
@@ -99,7 +99,7 @@ def check_task_success(
             found_valid_blob = True
             break
 
-    if debug:
+    if True:
         cv2.imwrite("DEBUG_success_diff.jpg", final_mask)
         full_debug = cv2.cvtColor(curr_u8, cv2.COLOR_RGB2BGR)
         cv2.rectangle(full_debug, (x, y), (x+w, y+h), (0, 255, 0), 2)
