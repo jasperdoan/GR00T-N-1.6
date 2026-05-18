@@ -137,8 +137,8 @@ class GraspDetector:
         x, y, w, h = WRIST_GRASP_ROI
         roi = safe_base[y:y+h, x:x+w]
         
-        # Note: Using RGB2GRAY because LeRobot outputs RGB natively
-        self.baseline_gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+        # Note: Using BGR2GRAY because LeRobot outputs BGR natively
+        self.baseline_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
     def update(self, obs: Dict[str, Any]) -> bool:
         # --- Signal D: Time gating ---
@@ -156,7 +156,7 @@ class GraspDetector:
         safe_curr = _ensure_uint8(wrist_img)
         x, y, w, h = WRIST_GRASP_ROI
         roi = safe_curr[y:y+h, x:x+w]
-        curr_gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+        curr_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
         # --- Signal A: Stability check (% still between frames) ---
         is_stable = False
@@ -195,4 +195,4 @@ class GraspDetector:
             safe_img = _ensure_uint8(wrist_img)
             x, y, w, h = WRIST_GRASP_ROI
             roi = safe_img[y:y+h, x:x+w]
-            self.prev_gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+            self.prev_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
