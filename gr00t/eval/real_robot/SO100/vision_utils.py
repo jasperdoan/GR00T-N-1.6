@@ -188,6 +188,32 @@ class GraspDetector:
         self.history.append(frame_success)
         return len(self.history) == self.history.maxlen and all(self.history)
 
+    def check_grasp_maintained(self, obs: Dict[str, Any]) -> bool:
+        """
+        Fast-path check intended for monitoring the object during transit.
+        Disregards time-gating and stability (since the arm is moving).
+        Returns False if the object slips out of the gripper.
+        """
+        wrist_img: Optional[np.ndarray] = obs.get("wrist")
+        if wrist_img is None:
+            return True  # Assume true if camera drops a single frame
+
+        safe_curr = _ensure_uint8(wrist_img)
+        x, y, w, h = WRIST_GRASP_ROI
+        roi = safe_curr[y:y+h, x:x+w]
+        curr_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+        # Check visual presence (allow slightly lower threshold to account for shifting)
+        diff_presence = cv2.absdiff(curr_gray, self.baseline_gray)
+        presence_px = np.sum(diff_presence > WRIST_PRESENCE_THR)
+        has_object = presence_px >= (WRIST_MIN_PRESENCE_PX * 0.75)
+
+        # Check that the gripper hasn't swung completely wide open
+        gripper_pos = obs.get("gripper.pos", GRIPPER_OPEN_POS)
+        is_gripping = float(gripper_pos) <= GRIPPER_TRANSPORT_MAX
+
+        return has_object and is_gripping
+
     def _update_prev_frame(self, obs: Dict[str, Any]):
         """Maintain tracking in the background while time-gated."""
         wrist_img = obs.get("wrist")

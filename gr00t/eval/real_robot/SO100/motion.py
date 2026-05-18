@@ -13,7 +13,7 @@ Public API:
 """
 
 import time
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -40,6 +40,17 @@ CONTROL_HZ = 30
 
 
 # =============================================================================
+# Exceptions
+# =============================================================================
+
+class GraspLostException(Exception):
+    """Raised when an object slips from the gripper during transit."""
+    def __init__(self, message: str, last_obs: Dict[str, Any]):
+        super().__init__(message)
+        self.last_obs = last_obs
+
+
+# =============================================================================
 # Core Lerp Engine  (Quintic Smoothstep)
 # =============================================================================
 
@@ -48,6 +59,7 @@ def lerp_to_waypoint(
     target: Dict[str, float],
     duration: float,
     fixed_joints: Optional[Dict[str, float]] = None,
+    monitor_callback: Optional[Callable[[Dict[str, Any]], bool]] = None,
 ) -> None:
     """
     Smoothly interpolate from the robot's current joint positions to *target*
@@ -60,12 +72,13 @@ def lerp_to_waypoint(
     motion profile.
 
     Args:
-        robot:        LeRobot Robot instance (get_observation / send_action).
-        target:       Mapping of joint_name → target angle (degrees).
-                      Joints absent from *target* are held at their current value.
-        duration:     Total duration of the move in seconds.
-        fixed_joints: Optional overrides applied at every step regardless of
-                      interpolation (e.g. keep gripper closed during transport).
+        robot:            LeRobot Robot instance (get_observation / send_action).
+        target:           Mapping of joint_name → target angle (degrees).
+                          Joints absent from *target* are held at their current value.
+        duration:         Total duration of the move in seconds.
+        fixed_joints:     Optional overrides applied at every step regardless of
+                          interpolation (e.g. keep gripper closed during transport).
+        monitor_callback: Function evaluated every step. If it returns False, execution aborts.
     """
     obs   = robot.get_observation()
     start = {j: float(obs.get(j, HOME_ACTION.get(j, 0.0))) for j in JOINT_NAMES}
@@ -85,6 +98,12 @@ def lerp_to_waypoint(
             action.update(fixed_joints)
 
         robot.send_action(action)
+
+        # Monitor Transit Health (The "Oops" factor)
+        if monitor_callback is not None:
+            obs_now = robot.get_observation()
+            if not monitor_callback(obs_now):
+                raise GraspLostException("Grasp lost during linear interpolation.", obs_now)
 
         elapsed = time.time() - tic
         sleep_t = 1.0 / CONTROL_HZ - elapsed
@@ -118,6 +137,7 @@ def arc_trajectory(
     p_end: Dict[str, float],
     duration: float,
     fixed_joints: Optional[Dict[str, float]] = None,
+    monitor_callback: Optional[Callable[[Dict[str, Any]], bool]] = None,
 ) -> None:
     """
     Executes a smooth Quadratic Bezier curve.
@@ -151,6 +171,12 @@ def arc_trajectory(
 
         robot.send_action(action)
 
+        # Monitor Transit Health
+        if monitor_callback is not None:
+            obs_now = robot.get_observation()
+            if not monitor_callback(obs_now):
+                raise GraspLostException("Grasp lost during arc trajectory.", obs_now)
+
         elapsed = time.time() - tic
         sleep_t = 1.0 / CONTROL_HZ - elapsed
         if sleep_t > 0:
@@ -167,28 +193,40 @@ def move_to_home(robot, duration: float = LERP_DURATION_HOME) -> None:
     lerp_to_waypoint(robot, HOME_ACTION, duration)
 
 
-def move_to_ready(robot, task_type: str, duration: float = LERP_DURATION_LIFT) -> None:
+def move_to_ready(
+    robot, 
+    task_type: str, 
+    duration: float = LERP_DURATION_LIFT,
+    pan_override: Optional[float] = None
+) -> None:
     """
     Move to the task-specific approach / ready position.
 
-    Target joints are looked up from constants.READY_POSITIONS[task_type],
-    making it trivial to add new task types without touching this function.
+    Target joints are looked up from constants.READY_POSITIONS[task_type].
+    If pan_override is provided, the robot will adopt the safe ready elevation
+    (lift/elbow/wrist) but hold the requested shoulder pan to look down at a custom area.
     The gripper is always forced open (GRIPPER_OPEN_POS) throughout the move.
 
     Args:
-        robot:     LeRobot Robot instance.
-        task_type: Task identifier string, e.g. "check_in" or "check_out".
-        duration:  Move duration in seconds.
+        robot:        LeRobot Robot instance.
+        task_type:    Task identifier string, e.g. "check_in" or "check_out".
+        duration:     Move duration in seconds.
+        pan_override: Optional custom shoulder pan to use instead of the default.
 
     Raises:
         ValueError if task_type is not present in READY_POSITIONS.
     """
-    target = READY_POSITIONS.get(task_type)
-    if target is None:
+    base_target = READY_POSITIONS.get(task_type)
+    if base_target is None:
         raise ValueError(
             f"Unknown task_type '{task_type}'. "
             f"Expected one of: {list(READY_POSITIONS.keys())}"
         )
+        
+    target = base_target.copy()
+    if pan_override is not None:
+        target["shoulder_pan.pos"] = pan_override
+        
     print(f">>> Moving to READY [{task_type}] over {duration:.1f}s …")
     lerp_to_waypoint(
         robot,
@@ -202,9 +240,15 @@ def move_to_ready(robot, task_type: str, duration: float = LERP_DURATION_LIFT) -
 # Scripted Transport Sequence
 # =============================================================================
 
-def scripted_transport(robot, task_type: str, grasp_obs: Dict) -> None:
+def scripted_transport(
+    robot, 
+    task_type: str, 
+    grasp_obs: Dict, 
+    monitor_callback: Optional[Callable[[Dict[str, Any]], bool]] = None
+) -> None:
     """
     Execute the deterministic pick-to-place trajectory using fluid Bezier arcs.
+    Now actively monitored by monitor_callback to detect mid-air object drops.
     """
     place_waypoint = (
         STORAGE_PLACE.copy() if task_type == "check_in" else CHECKOUT_PLACE.copy()
@@ -226,6 +270,7 @@ def scripted_transport(robot, task_type: str, grasp_obs: Dict) -> None:
         p_end=place_waypoint,
         duration=(LERP_DURATION_LIFT + LERP_DURATION_PLACE) * 0.8, # Speed up slightly
         fixed_joints=transport_lock,
+        monitor_callback=monitor_callback,  # Only applied while holding the object!
     )
 
     # ── Phase B: Open gripper ──

@@ -1,26 +1,15 @@
 """
-SO100 Hybrid Modular Evaluation Script
-=======================================
+SO100 Hybrid Modular Evaluation Script (FSM & Monitored Transit)
+=================================================================
 
 Architecture
 ------------
   Phase 1 — VLA (GR00T):      Approach and grasp the target cube.
   Phase 2 — Scripted Motion:  Transport, place, and return to Home.
 
-The language instruction passed to GR00T contains only the target color
-(e.g. "red"), not the full instruction. Task routing (check-in vs check-out)
-is handled here in the orchestration layer.
-
-VLA smoothness
---------------
-  Inference runs in a background thread (AsyncPolicyRunner) so the control
-  loop never stalls waiting for the GPU.  Overlapping action chunks are blended
-  via TemporalEnsemble so the hand-off between chunks is invisible to the robot.
-  Together these eliminate the burst-pause-burst pattern of naive chunk execution.
-
-Usage
------
-  python eval_so100.py --robot <cfg> --lang_instruction "Check in red cube"
+Now wrapped in a Finite State Machine (FSM) behavior loop! If the robot 
+drops the object mid-air, it captures the exact pan location of the drop 
+and initiates a local visual recovery search without returning home.
 """
 
 # =============================================================================
@@ -30,6 +19,7 @@ Usage
 import logging
 import time
 from dataclasses import asdict, dataclass
+from enum import Enum, auto
 from pprint import pformat
 from typing import Optional
 
@@ -48,8 +38,8 @@ from lerobot.robots import so_follower as so101_follower  # noqa: F401
 from lerobot.utils.utils import init_logging, log_say
 
 from adapter        import So100Adapter
-from constants      import CHECK_OUT_ZONE, STORAGE_ZONE, KNOWN_OBJECTS
-from motion         import move_to_home, move_to_ready, scripted_transport
+from constants      import CHECK_OUT_ZONE, STORAGE_ZONE, KNOWN_OBJECTS, JOINT_NAMES, GRIPPER_OPEN_POS
+from motion         import move_to_home, move_to_ready, scripted_transport, lerp_to_waypoint, GraspLostException
 from policy_runner  import AsyncPolicyRunner
 from vision_utils   import GraspDetector, check_task_success
 
@@ -66,19 +56,13 @@ class EvalConfig:
     lang_instruction:  str   = "Check in red cube"
     play_sounds:       bool  = False
     vla_timeout:       int   = 15    # Max seconds for the VLA grasp phase
+    
+    # Fault Tolerance Settings
+    max_retries:       int   = 2     # How many times to retry on a timeout or drop
 
     # --- Async runner settings -----------------------------------------------
-    # How many control steps to execute before triggering re-inference.
-    # Lower  → more frequent inference, smoother adaptation, higher GPU load.
-    # Higher → less GPU load, slightly longer coasting on a stale chunk.
-    # Recommended range: 4–8 for a 16-step horizon at 30 Hz.
     replan_every:      int   = 6
-
-    # Temperature for TemporalEnsemble.
-    # 0.0 → uniform average of all live chunks (maximum smoothing).
-    # 0.1 → moderate bias to the newest chunk (recommended).
-    # 1.0 → nearly always takes the newest chunk (minimal blending).
-    ensemble_temp:     float = 0.25
+    ensemble_temp:     float = 0.1
 
 
 # =============================================================================
@@ -112,6 +96,20 @@ def parse_instruction(instruction: str):
 
     return task_type, target_object, target_zone
 
+
+# =============================================================================
+# Finite State Machine States
+# =============================================================================
+
+class FSMState(Enum):
+    SEARCHING = auto()
+    TRANSPORT = auto()
+    RECOVERY  = auto()
+    VERIFY    = auto()
+    DONE      = auto()
+    FAILED    = auto()
+
+
 # =============================================================================
 # Main Evaluation Loop
 # =============================================================================
@@ -135,7 +133,6 @@ def eval(cfg: EvalConfig):
     policy_client = PolicyClient(host=cfg.policy_host, port=cfg.policy_port)
     adapter       = So100Adapter(policy_client)
 
-    # Build the async runner — inference will overlap with robot execution
     runner = AsyncPolicyRunner(
         policy        = adapter,
         replan_every  = cfg.replan_every,
@@ -154,75 +151,155 @@ def eval(cfg: EvalConfig):
     baseline_img = baseline_obs["front"]
     baseline_wrist = baseline_obs["wrist"]
 
-    # ── Phase 1: VLA — approach and grasp ────────────────────────────────────
-    print("\n─── Phase 1: VLA Grasp ─────────────────────────────────────────")
-    log_say(f"Searching for {target_object}.", cfg.play_sounds)
-    print(
-        f">>> Running async inference "
-        f"(replan_every={cfg.replan_every}, ensemble_temp={cfg.ensemble_temp}) …"
-    )
+    grasp_detector = GraspDetector(baseline_wrist_img=baseline_wrist)
+    
+    # ── FSM Initialization ───────────────────────────────────────────────────
+    state = FSMState.SEARCHING
+    search_retries = 0
+    grasp_obs: Optional[dict] = None
+    recovery_pan: Optional[float] = None
 
-    grasp_obs:      Optional[dict] = None
-    start_time      = time.time()
-    # Pass the empty wrist image to the detector!
-    grasp_detector  = GraspDetector(baseline_wrist_img=baseline_wrist)
+    while state not in (FSMState.DONE, FSMState.FAILED):
+        
+        # =====================================================================
+        # STATE: SEARCHING
+        # =====================================================================
+        if state == FSMState.SEARCHING:
+            print("\n─── [FSM: SEARCHING] VLA Grasp Phase ────────────────────────")
+            log_say(f"Searching for {target_object}.", cfg.play_sounds)
+            
+            start_time = time.time()
+            grasp_detector.start_time = time.time()  # Reset the time gate!
+            
+            while True:
+                # ── Timeout handling ──
+                if time.time() - start_time > cfg.vla_timeout:
+                    print("\n[TIMEOUT] VLA grasp phase exceeded limit.")
+                    search_retries += 1
+                    
+                    if search_retries > cfg.max_retries:
+                        print("[FSM] Max retries exceeded. Task failed.")
+                        state = FSMState.FAILED
+                    else:
+                        print(f"[FSM] Retrying ({search_retries}/{cfg.max_retries}). Resetting view.")
+                        # Reset view to give the VLA a fresh perspective globally
+                        move_to_home(robot)
+                        move_to_ready(robot, task_type)
+                        start_time = time.time()
+                        grasp_detector.start_time = time.time()
+                        runner.reset()
+                    break  # Break inner loop, state is handled
+                
+                tic = time.time()
+                obs = robot.get_observation()
+                obs["lang"] = target_object
+                
+                # ── Grasp Detection ──
+                if grasp_detector.update(obs):
+                    print(f"\n✅ [GRASP CONFIRMED] {target_object.upper()} secured!")
+                    grasp_obs = obs
+                    # Reset recovery pan on success so it doesn't leak into future cycles
+                    recovery_pan = None 
+                    state = FSMState.TRANSPORT
+                    break
+                
+                # ── Action Execution ──
+                action = runner.step(obs)
+                if action is not None:
+                    robot.send_action(action)
+                
+                # Maintain 30 Hz
+                elapsed = time.time() - tic
+                sleep_t = 1.0 / 30 - elapsed
+                if sleep_t > 0:
+                    time.sleep(sleep_t)
+            
+            runner.reset()  # Clear stale history before leaving SEARCHING
 
-    while True:
-        # ── Failsafe timeout ────────────────────────────────────────────────
-        if time.time() - start_time > cfg.vla_timeout:
-            print("\n[TIMEOUT] VLA grasp phase exceeded limit. Aborting.")
-            move_to_home(robot)
-            runner.reset()
-            return
+        # =====================================================================
+        # STATE: TRANSPORT
+        # =====================================================================
+        elif state == FSMState.TRANSPORT:
+            print("\n─── [FSM: TRANSPORT] Scripted Transport ─────────────────────")
+            log_say("Grasp confirmed. Executing transport.", cfg.play_sounds)
+            
+            monitor_cb = grasp_detector.check_grasp_maintained
+            
+            try:
+                scripted_transport(robot, task_type, grasp_obs, monitor_callback=monitor_cb)
+                state = FSMState.VERIFY
+            except GraspLostException as e:
+                print(f"\n⚠️ [FSM: Grasp Lost] Exception caught mid-air: {e}")
+                log_say("Object dropped mid-air. Initiating local recovery.", cfg.play_sounds)
+                
+                # Extract the precise shoulder pan location where the drop happened
+                recovery_pan = float(e.last_obs.get("shoulder_pan.pos", 0.0))
+                state = FSMState.RECOVERY
 
-        tic = time.time()
+        # =====================================================================
+        # STATE: VERIFY
+        # =====================================================================
+        elif state == FSMState.VERIFY:
+            print("\n─── [FSM: VERIFY] Checking Target Zone Placement ────────────")
+            time.sleep(0.3)
+            final_obs = robot.get_observation()
+            success   = check_task_success(final_obs["front"], baseline_img, target_zone)
+            
+            if success:
+                print(f"\n🎉 [SUCCESS] {target_object.upper()} confirmed in target zone.")
+                log_say("Task complete.", cfg.play_sounds)
+                state = FSMState.DONE
+            else:
+                print(f"\n⚠️  [WARN] Object not detected in target zone after placement. Bounced out?")
+                log_say("Placement could not be confirmed.", cfg.play_sounds)
+                
+                search_retries += 1
+                if search_retries > cfg.max_retries:
+                    print("[FSM] Max retries exceeded. Task failed.")
+                    state = FSMState.FAILED
+                else:
+                    print("[FSM] Retrying task.")
+                    move_to_ready(robot, task_type)
+                    state = FSMState.SEARCHING
 
-        obs = robot.get_observation()
-        obs["lang"] = target_object  # <-- Passing the exact object string to VLA
+        # =====================================================================
+        # STATE: RECOVERY
+        # =====================================================================
+        elif state == FSMState.RECOVERY:
+            print("\n─── [FSM: RECOVERY] Local Error Correction ──────────────────")
+            # Pop the gripper open safely in case the cube is wedged awkwardly
+            obs = robot.get_observation()
+            drop_pose = {j: float(obs.get(j, 0.0)) for j in JOINT_NAMES}
+            drop_pose["gripper.pos"] = GRIPPER_OPEN_POS
+            lerp_to_waypoint(robot, drop_pose, 0.5)
+            
+            # Move to ready height/pitch, but keep the pan from where we dropped it
+            # so the VLA can immediately look down and find the dropped object!
+            if recovery_pan is not None:
+                print(f"  [FSM: RECOVERY] Retaining local pan angle ({recovery_pan:.1f}) to find dropped item.")
+                move_to_ready(robot, task_type, pan_override=recovery_pan)
+            else:
+                # Fallback if recovery_pan somehow wasn't captured
+                move_to_home(robot)
+                move_to_ready(robot, task_type)
+            
+            search_retries += 1
+            if search_retries > cfg.max_retries:
+                print("[FSM] Max retries exceeded during recovery. Failing.")
+                state = FSMState.FAILED
+            else:
+                state = FSMState.SEARCHING
 
-        # ── Grasp detection ─────────────────────────────────────────────────
-        if grasp_detector.update(obs):  # <-- Removed color dependency
-            print(f"\n✅ [GRASP CONFIRMED] {target_object.upper()} secured!")
-            grasp_obs = obs
-            break
 
-        # ── Async VLA step ──────────────────────────────────────────────────
-        # runner.step() returns the temporally-ensembled action for this tick.
-        # On the very first call it blocks briefly for the initial inference;
-        # all subsequent calls return immediately from the ensemble buffer.
-        action = runner.step(obs)
-        if action is not None:
-            robot.send_action(action)
+    # ── Final Teardown ───────────────────────────────────────────────────────
+    if state == FSMState.FAILED:
+        print("\n❌ [EVALUATION FAILED] The robot was unable to complete the task.")
+        move_to_home(robot)
+    elif state == FSMState.DONE:
+        print("\n✅ [EVALUATION COMPLETE] Finished successfully.")
+        # move_to_home(robot) is already handled at the end of phase D in scripted_transport
 
-        # ── Hold 30 Hz regardless of inference time ─────────────────────────
-        elapsed = time.time() - tic
-        sleep_t = 1.0 / 30 - elapsed
-        if sleep_t > 0:
-            time.sleep(sleep_t)
-
-    runner.reset()   # clear stale chunk history before scripted phase
-
-    # ── Phase 2: Scripted transport ───────────────────────────────────────────
-    print("\n─── Phase 2: Scripted Transport ────────────────────────────────")
-    log_say("Grasp confirmed. Executing transport.", cfg.play_sounds)
-
-    scripted_transport(robot, task_type, grasp_obs)
-
-    # ── Post-task: verify placement with vision ───────────────────────────────
-    time.sleep(0.3)   # let the scene settle before checking
-    final_obs = robot.get_observation()
-    success   = check_task_success(
-        final_obs["front"], baseline_img, target_zone
-    )
-
-    if success:
-        print(f"\n🎉 [SUCCESS] {target_object.upper()} confirmed in target zone.")
-        log_say("Task complete.", cfg.play_sounds)
-    else:
-        print(f"\n⚠️  [WARN] Object not detected in target zone after placement.")
-        log_say("Placement could not be confirmed.", cfg.play_sounds)
-
-    print("\n>>> Evaluation complete. System shutting down cleanly.")
+    print("\n>>> System shutting down cleanly.")
 
 
 if __name__ == "__main__":
