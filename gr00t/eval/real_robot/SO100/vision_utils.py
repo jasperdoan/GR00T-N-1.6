@@ -35,6 +35,12 @@ def _clean_mask(mask: np.ndarray, kernel_size: int = 5) -> np.ndarray:
     return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
 
+def _ensure_uint8(img: np.ndarray) -> np.ndarray:
+    if img.dtype != np.uint8:
+        return (img * 255).clip(0, 255).astype(np.uint8)
+    return img.copy()
+
+
 # =============================================================================
 # Task Success Detection (front camera, zone-based presence check)
 # =============================================================================
@@ -76,7 +82,7 @@ def check_task_success(
 
     found_valid_blob = False
     
-    if True:
+    if debug:
         print(f"\n--- Vision Debug [Presence Check] ---")
         print(f"Diff mask pixels: {np.sum(final_mask > 0)}")
         print(f"Contours found: {len(contours)}")
@@ -99,7 +105,7 @@ def check_task_success(
             found_valid_blob = True
             break
 
-    if True:
+    if debug:
         cv2.imwrite("DEBUG_success_diff.jpg", final_mask)
         full_debug = cv2.cvtColor(curr_u8, cv2.COLOR_RGB2BGR)
         cv2.rectangle(full_debug, (x, y), (x+w, y+h), (0, 255, 0), 2)
@@ -126,10 +132,13 @@ class GraspDetector:
         self.start_time = time.time()
         self.prev_gray = None
         
-        # Save the empty gripper baseline as grayscale
+        # Scale 0-1 float to 0-255 integer and convert to Grayscale
+        safe_base = _ensure_uint8(baseline_wrist_img)
         x, y, w, h = WRIST_GRASP_ROI
-        roi_bgr = baseline_wrist_img[y:y+h, x:x+w]
-        self.baseline_gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+        roi = safe_base[y:y+h, x:x+w]
+        
+        # Note: Using RGB2GRAY because LeRobot outputs RGB natively
+        self.baseline_gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
 
     def update(self, obs: Dict[str, Any]) -> bool:
         # --- Signal D: Time gating ---
@@ -143,9 +152,11 @@ class GraspDetector:
             self.history.append(False)
             return False
 
+        # Scale 0-1 float to 0-255 integer
+        safe_curr = _ensure_uint8(wrist_img)
         x, y, w, h = WRIST_GRASP_ROI
-        roi_bgr = wrist_img[y:y+h, x:x+w]
-        curr_gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+        roi = safe_curr[y:y+h, x:x+w]
+        curr_gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
 
         # --- Signal A: Stability check (% still between frames) ---
         is_stable = False
@@ -170,6 +181,10 @@ class GraspDetector:
 
         print(f'Grasp check: {frame_success} | stable: {is_stable} | has_obj: {has_object} (px diff: {presence_px}) | gripping: {is_gripping} (pos: {float(gripper_pos):.1f})')
 
+        # Optional: Uncomment below to save an image and physically see the difference mask if you need to tune thresholds!
+        if presence_px >= 0:
+            cv2.imwrite("DEBUG_wrist_diff.jpg", diff_presence)
+
         self.history.append(frame_success)
         return len(self.history) == self.history.maxlen and all(self.history)
 
@@ -177,6 +192,7 @@ class GraspDetector:
         """Maintain tracking in the background while time-gated."""
         wrist_img = obs.get("wrist")
         if wrist_img is not None:
+            safe_img = _ensure_uint8(wrist_img)
             x, y, w, h = WRIST_GRASP_ROI
-            roi_bgr = wrist_img[y:y+h, x:x+w]
-            self.prev_gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+            roi = safe_img[y:y+h, x:x+w]
+            self.prev_gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
