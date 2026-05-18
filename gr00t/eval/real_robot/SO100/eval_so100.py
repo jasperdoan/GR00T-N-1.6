@@ -78,7 +78,7 @@ class EvalConfig:
     # 0.0 → uniform average of all live chunks (maximum smoothing).
     # 0.1 → moderate bias to the newest chunk (recommended).
     # 1.0 → nearly always takes the newest chunk (minimal blending).
-    ensemble_temp:     float = 0.1
+    ensemble_temp:     float = 0.25
 
 
 # =============================================================================

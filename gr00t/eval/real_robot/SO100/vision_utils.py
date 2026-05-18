@@ -91,17 +91,17 @@ def check_task_success(
         area = cv2.contourArea(cnt)
         bx, by, bw, bh = cv2.boundingRect(cnt)
         
-        touches_edge = (
-            bx <= edge_margin
-            or by <= edge_margin
-            or (bx + bw) >= (w - edge_margin)
-            or (by + bh) >= (h - edge_margin)
-        )
+        # touches_edge = (
+        #     bx <= edge_margin
+        #     or by <= edge_margin
+        #     or (bx + bw) >= (w - edge_margin)
+        #     or (by + bh) >= (h - edge_margin)
+        # )
         
         if debug:
             print(f"  Contour {i}: Area={area}, TouchesEdge={touches_edge}")
 
-        if area >= MIN_BLOB_AREA_PX and not touches_edge:
+        if area >= MIN_BLOB_AREA_PX:
             found_valid_blob = True
             break
 
