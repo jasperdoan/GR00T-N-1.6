@@ -2,8 +2,6 @@
 SO100 Constants: Workspace zones, color ranges, home position, and scripted waypoints.
 """
 
-import numpy as np
-
 # =============================================================================
 # Workspace Zone Definitions (x, y, width, height) in front-camera pixels
 # =============================================================================
@@ -41,8 +39,8 @@ MIN_BLOB_AREA_PX = 100
 # Bounding box between gripper fingers from calibration
 WRIST_GRASP_ROI = (276, 293, 193, 186)
 
-WRIST_PRESENCE_THR   = 30     # Pixel difference intensity to count as "changed" from baseline
-WRIST_MIN_PRESENCE_PX= 1500   # Min changed pixels to confirm an object is in the gripper
+WRIST_PRESENCE_THR   = 50     # Pixel difference intensity to count as "changed" from baseline
+WRIST_MIN_PRESENCE_PX= 27500  # Min changed pixels to confirm an object is in the gripper
 WRIST_STABILITY_THR  = 6.0    # Diff threshold; any pixel changing > X is "moving"
 WRIST_CONFIRM_FRAMES = 3      # Number of consecutive true frames required
 VLA_GRASP_MIN_TIME   = 1.0    # Seconds the VLA runs before checking for grasps
