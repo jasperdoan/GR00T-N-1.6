@@ -1,9 +1,9 @@
 """
-SO100 Vision Utilities (Feature-Based Tracking)
+SO100 Vision Utilities (Signal-Based Tracking)
 
 Two independent detectors:
   1. check_task_success  — confirms a new object is stably placed in a target zone using background subtraction.
-  2. GraspDetector       — Uses Optical Flow for robust mid-air grasp monitoring.
+  2. GraspDetector       — Uses a robust Signal A-D logic for both initial grasp and mid-transit monitoring.
 """
 
 import collections
@@ -120,28 +120,30 @@ def check_task_success(
 
 class GraspDetector:
     """
-    Now uses Optical Flow for mid-air transit monitoring.
-    1. Initial grasp check is the same (stability, presence, gripper pos).
-    2. On success, `lock_grasp` finds unique feature points on the object.
-    3. `check_grasp_maintained` tracks those features. If too many are lost, it fails.
+    Robust Signal A-D tracking logic. 
+    Handles both the initial grasp validation and the mid-transit drop checks.
     """
 
     def __init__(self, baseline_wrist_img: np.ndarray):
+        # Initial Grasp Trackers
         self.history = collections.deque(maxlen=WRIST_CONFIRM_FRAMES)
         self.start_time = time.time()
         self.prev_gray = None
         
-        # --- Optical Flow Members ---
-        self.locked_features = None
-        self.last_flow_gray = None
-        self.feature_params = dict(maxCorners=40, qualityLevel=0.3, minDistance=7, blockSize=7)
-        self.lk_params = dict(winSize=(15, 15), maxLevel=2, criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+        # Mid-Transit Trackers
+        self.transit_start_time = 0.0
+        self.locked_color_mass = None
+        self.transit_lost_count = 0
+        self.roi_area = WRIST_GRASP_ROI[2] * WRIST_GRASP_ROI[3]
         
         safe_base = _ensure_uint8(baseline_wrist_img)
         x, y, w, h = WRIST_GRASP_ROI
         roi = safe_base[y:y+h, x:x+w]
         self.baseline_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
+    # -------------------------------------------------------------------------
+    # Phase 1: Initial Grasp Validation
+    # -------------------------------------------------------------------------
     def update(self, obs: Dict[str, Any]) -> bool:
         # --- Signal D: Time gating ---
         if time.time() - self.start_time < VLA_GRASP_MIN_TIME:
@@ -159,7 +161,7 @@ class GraspDetector:
         roi = safe_curr[y:y+h, x:x+w]
         curr_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-        # --- Signal A: Stability check ---
+        # --- Signal A: Stability check (% still between frames) ---
         is_stable = False
         if self.prev_gray is not None:
             diff_motion = cv2.absdiff(curr_gray, self.prev_gray)
@@ -180,85 +182,91 @@ class GraspDetector:
 
         frame_success = is_stable and has_object and is_gripping
         print(f'Grasp check: {frame_success} | stable: {is_stable} | has_obj: {has_object} (px diff: {presence_px}) | gripping: {is_gripping} (pos: {float(gripper_pos):.1f})')
+        
         self.history.append(frame_success)
         return len(self.history) == self.history.maxlen and all(self.history)
 
+    # -------------------------------------------------------------------------
+    # Phase 2: Transit Monitoring Setup
+    # -------------------------------------------------------------------------
     def lock_grasp(self, obs: Dict[str, Any]):
         """
-        Finds strong, unique features on the object to serve as anchors for optical flow tracking.
+        Takes a snapshot of the object exactly when FSM confirms grasp.
+        Applies heavy blur to track the "Blob of Color" rather than sharp edges.
         """
+        self.transit_start_time = time.time()
+        self.transit_lost_count = 0
+        
         wrist_img: Optional[np.ndarray] = obs.get("wrist")
         if wrist_img is not None:
             safe_curr = _ensure_uint8(wrist_img)
             x, y, w, h = WRIST_GRASP_ROI
             roi = safe_curr[y:y+h, x:x+w]
-            gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
             
-            features = cv2.goodFeaturesToTrack(gray_roi, mask=None, **self.feature_params)
-            
-            if features is not None:
-                print(f"  [GraspDetector] Locked onto {len(features)} visual features for tracking.")
-                self.locked_features = features
-                self.last_flow_gray = gray_roi
-            else:
-                print("  [GraspDetector] WARNING: Could not find good features to track on object.")
-                self.locked_features = None
+            # Heavy 21x21 Gaussian Blur to eliminate edge/shift sensitivity
+            self.locked_color_mass = cv2.GaussianBlur(roi, (21, 21), 0)
 
-
+    # -------------------------------------------------------------------------
+    # Phase 3: Mid-Transit Drop Detection
+    # -------------------------------------------------------------------------
     def check_grasp_maintained(self, obs: Dict[str, Any]) -> bool:
         """
-        Tracks the locked anchor points using Lucas-Kanade Optical Flow.
-        This is robust to lighting, motion blur, and perspective shift.
+        Monitors the grasp mid-transit using independent A-D signal logic.
         """
-        # Mechanical check first - fastest way to fail
-        gripper_pos = obs.get("gripper.pos", GRIPPER_OPEN_POS)
-        if float(gripper_pos) > GRIPPER_TRANSPORT_MAX:
-            return False
-
-        # If we never found features to track, we can't monitor. Default to True.
-        if self.locked_features is None or self.last_flow_gray is None:
+        # --- Signal A: Time Gating (Lift-off delay) ---
+        # Ignore checks for the first 0.5 seconds to let the arm clear the table
+        if time.time() - self.transit_start_time < 0.5:
             return True
+
+        if self.locked_color_mass is None:
+            return True # Fallback if lock wasn't called properly
 
         wrist_img: Optional[np.ndarray] = obs.get("wrist")
         if wrist_img is None:
-            return True  # Skip single dropped frame
+            return True # Ignore single dropped camera frames
 
+        # --- Signal B: Mechanical Gripper Check ---
+        gripper_pos = float(obs.get("gripper.pos", GRIPPER_OPEN_POS))
+        is_gripping = gripper_pos <= GRIPPER_TRANSPORT_MAX
+
+        # --- Signal C: Color Blob Integrity ---
         safe_curr = _ensure_uint8(wrist_img)
         x, y, w, h = WRIST_GRASP_ROI
         roi = safe_curr[y:y+h, x:x+w]
-        curr_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
-        # Calculate optical flow
-        new_features, status, _err = cv2.calcOpticalFlowPyrLK(
-            self.last_flow_gray, curr_gray, self.locked_features, None, **self.lk_params
-        )
+        # Heavily blur current frame to ignore shifting/shaking
+        curr_color_mass = cv2.GaussianBlur(roi, (21, 21), 0)
+        
+        # Compare to locked snapshot
+        diff = cv2.absdiff(curr_color_mass, self.locked_color_mass)
+        gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+        
+        # Generous threshold: Pixel must change by > 50 brightness levels to be "lost"
+        changed_px = np.sum(gray_diff > 50)
+        
+        # Object is safe if less than 50% of the ROI drastically changed color
+        is_visually_maintained = changed_px < (self.roi_area * 0.50)
 
-        # Count how many of our original features were successfully found in the new frame
-        if new_features is not None:
-            good_new = new_features[status == 1]
-            num_initial_features = len(self.locked_features)
-            num_found_features = len(good_new)
-            
-            # --- The Robustness Check ---
-            # If we lose more than 40% of our anchor points, the object is gone.
-            retention_ratio = num_found_features / num_initial_features
-            is_maintained = retention_ratio >= 0.60
-            
-            if not is_maintained:
-                print(f"  [GraspDetector] Grasp Lost! Feature retention dropped to {retention_ratio:.2%}")
-            
-            # Update the state for the next frame
-            self.last_flow_gray = curr_gray.copy()
-            self.locked_features = good_new.reshape(-1, 1, 2)
-            
-            return is_maintained
+        # Evaluate this specific frame
+        frame_maintained = is_gripping and is_visually_maintained
+
+        # --- Signal D: Sequential Confirmation ---
+        # Require 3 consecutive bad frames to abort. This perfectly filters out 
+        # a split-second shadow or camera glare ruining the run.
+        if not frame_maintained:
+            self.transit_lost_count += 1
+            print(f"  [Transit Monitor] Warning: Drop detected (Frame {self.transit_lost_count}/3) | grip: {is_gripping} | visual: {is_visually_maintained} (Diff px: {changed_px})")
         else:
-            # Catastrophic failure - no features found at all.
-            print("  [GraspDetector] Grasp Lost! No features tracked.")
+            self.transit_lost_count = 0  # Reset counter immediately on a good frame
+
+        # If it fails 3 times in a row, the object is truly gone
+        if self.transit_lost_count >= 3:
             return False
+            
+        return True
 
     def _update_prev_frame(self, obs: Dict[str, Any]):
-        """Maintain tracking in the background while time-gated."""
+        """Maintain background tracking while initial check is time-gated."""
         wrist_img = obs.get("wrist")
         if wrist_img is not None:
             safe_img = _ensure_uint8(wrist_img)
