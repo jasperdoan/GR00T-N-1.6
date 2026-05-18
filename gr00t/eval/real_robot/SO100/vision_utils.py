@@ -45,7 +45,7 @@ def check_task_success(
     zone: Tuple[int, int, int, int],
     diff_threshold: int = 25,
     edge_margin: int = 3,
-    debug: bool = False,
+    debug: bool = True,
 ) -> bool:
     """
     Returns True if a new object of sufficient size has appeared in the zone.
