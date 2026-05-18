@@ -111,9 +111,9 @@ READY_POSITIONS = {
 # =============================================================================
 
 LIFT_OVERRIDE = {
-    "shoulder_lift.pos": -5.3,
-    "elbow_flex.pos":    8.4,
-    "wrist_flex.pos":    67.1,
+    "shoulder_lift.pos": -33.3,
+    "elbow_flex.pos":    23.4,
+    "wrist_flex.pos":    70.1,
 }
 
 STORAGE_PLACE = {
