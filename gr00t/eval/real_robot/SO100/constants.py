@@ -136,4 +136,4 @@ POST_DROP_PAUSE     = 0.35  # pause after dropping cube (seconds) — increased 
 LERP_DURATION_LIFT  = 1.0
 LERP_DURATION_PLACE = 1.0
 LERP_DURATION_DROP  = 0.4   # increased from 0.1 — prevents flinging the cube on release
-LERP_DURATION_HOME  = 1.0
+LERP_DURATION_HOME  = 2.0
