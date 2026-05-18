@@ -198,6 +198,8 @@ def eval(cfg: EvalConfig):
                 if grasp_detector.update(obs):
                     print(f"\n✅ [GRASP CONFIRMED] {target_object.upper()} secured!")
                     grasp_obs = obs
+                    # Take visual snapshot of object for transit monitoring
+                    grasp_detector.lock_grasp(obs)
                     # Reset recovery pan on success so it doesn't leak into future cycles
                     recovery_pan = None 
                     state = FSMState.TRANSPORT

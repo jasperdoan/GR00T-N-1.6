@@ -131,6 +131,8 @@ class GraspDetector:
         self.history = collections.deque(maxlen=WRIST_CONFIRM_FRAMES)
         self.start_time = time.time()
         self.prev_gray = None
+        self.grasped_gray_roi = None  # Used for mid-air tracking
+        self.roi_area = WRIST_GRASP_ROI[2] * WRIST_GRASP_ROI[3]
         
         # Scale 0-1 float to 0-255 integer and convert to Grayscale
         safe_base = _ensure_uint8(baseline_wrist_img)
@@ -181,38 +183,60 @@ class GraspDetector:
 
         print(f'Grasp check: {frame_success} | stable: {is_stable} | has_obj: {has_object} (px diff: {presence_px}) | gripping: {is_gripping} (pos: {float(gripper_pos):.1f})')
 
-        # Optional: Uncomment below to save an image and physically see the difference mask if you need to tune thresholds!
-        if presence_px >= 0:
-            cv2.imwrite("DEBUG_wrist_diff.jpg", diff_presence)
-
         self.history.append(frame_success)
         return len(self.history) == self.history.maxlen and all(self.history)
 
-    def check_grasp_maintained(self, obs: Dict[str, Any]) -> bool:
+    def lock_grasp(self, obs: Dict[str, Any]):
         """
-        Fast-path check intended for monitoring the object during transit.
-        Disregards time-gating and stability (since the arm is moving).
-        Returns False if the object slips out of the gripper.
+        Takes a snapshot of the object EXACTLY when the FSM confirms the grasp.
+        This "Visual Lock" allows us to track the object during transit.
         """
         wrist_img: Optional[np.ndarray] = obs.get("wrist")
+        if wrist_img is not None:
+            safe_curr = _ensure_uint8(wrist_img)
+            x, y, w, h = WRIST_GRASP_ROI
+            roi = safe_curr[y:y+h, x:x+w]
+            self.grasped_gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+    def check_grasp_maintained(self, obs: Dict[str, Any]) -> bool:
+        """
+        Mid-air object tracking using Exponential Moving Average (EMA).
+        If the robot misses the pick, or drops the object, the background zooms past 
+        the camera, completely changing the ROI structure, and this returns False.
+        """
+        # First: mechanical check. Did the gripper swing wide open?
+        gripper_pos = obs.get("gripper.pos", GRIPPER_OPEN_POS)
+        if float(gripper_pos) > GRIPPER_TRANSPORT_MAX:
+            return False
+
+        if self.grasped_gray_roi is None:
+            return True  # Fallback if lock wasn't called properly
+
+        wrist_img: Optional[np.ndarray] = obs.get("wrist")
         if wrist_img is None:
-            return True  # Assume true if camera drops a single frame
+            return True  # Drop single frame
 
         safe_curr = _ensure_uint8(wrist_img)
         x, y, w, h = WRIST_GRASP_ROI
         roi = safe_curr[y:y+h, x:x+w]
         curr_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-        # Check visual presence (allow slightly lower threshold to account for shifting)
-        diff_presence = cv2.absdiff(curr_gray, self.baseline_gray)
-        presence_px = np.sum(diff_presence > WRIST_PRESENCE_THR)
-        has_object = presence_px >= (WRIST_MIN_PRESENCE_PX * 0.75)
+        # Compare current ROI to the "Visual Lock" snapshot
+        diff_from_grasp = cv2.absdiff(curr_gray, self.grasped_gray_roi)
+        changed_px = np.sum(diff_from_grasp > WRIST_STABILITY_THR)
 
-        # Check that the gripper hasn't swung completely wide open
-        gripper_pos = obs.get("gripper.pos", GRIPPER_OPEN_POS)
-        is_gripping = float(gripper_pos) <= GRIPPER_TRANSPORT_MAX
+        # Tolerance: If more than 40% of the pixels inside the gripper suddenly change,
+        # it means the background swooped in and replaced the object.
+        max_allowed_change = self.roi_area * 0.40
+        is_maintained = changed_px < max_allowed_change
 
-        return has_object and is_gripping
+        if is_maintained:
+            # Exponential Moving Average: slowly blend the current frame into the snapshot.
+            # This allows the lock to survive slow room lighting changes while swinging, 
+            # but still fail instantly on a sudden drop or structural change.
+            self.grasped_gray_roi = cv2.addWeighted(self.grasped_gray_roi, 0.8, curr_gray, 0.2, 0)
+
+        return is_maintained
 
     def _update_prev_frame(self, obs: Dict[str, Any]):
         """Maintain tracking in the background while time-gated."""
