@@ -8,6 +8,7 @@ expected input/output format.
 from typing import Any, Dict, List
 
 import numpy as np
+import cv2
 
 from constants import JOINT_NAMES
 
@@ -41,9 +42,19 @@ class So100Adapter:
 
     CAMERA_KEYS    = ["front", "wrist"]
     LANGUAGE_KEY   = "annotation.human.task_description"
+    IMAGE_SIZE     = 256
 
     def __init__(self, policy_client) -> None:
         self.policy = policy_client
+
+    def _process_image(self, img: np.ndarray) -> np.ndarray:
+        """Performs center crop to square and resizes to IMAGE_SIZE."""
+        h, w = img.shape[:2]
+        min_dim = min(h, w)
+        start_h = (h - min_dim) // 2
+        start_w = (w - min_dim) // 2
+        crop = img[start_h : start_h + min_dim, start_w : start_w + min_dim]
+        return cv2.resize(crop, (self.IMAGE_SIZE, self.IMAGE_SIZE), interpolation=cv2.INTER_AREA)
 
     # -------------------------------------------------------------------------
     # Observation → Policy Input
@@ -56,7 +67,7 @@ class So100Adapter:
         )
 
         model_obs = {
-            "video": {k: obs[k] for k in self.CAMERA_KEYS},
+            "video": {k: self._process_image(obs[k]) for k in self.CAMERA_KEYS},
             "state": {
                 "single_arm": state[:5],
                 "gripper":    state[5:6],

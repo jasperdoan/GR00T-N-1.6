@@ -19,10 +19,11 @@ KNOWN_OBJECTS = [
     "red cube",
     "blue cube",
     "yellow cube",
-    "pink prism",
-    "orange sphere",
-    "dice",
-    "number 10 block"
+    "orange cube",
+    "pink cube",
+    "green prism",
+    "red ball",
+    "yellow ball"
 ]
 
 # =============================================================================

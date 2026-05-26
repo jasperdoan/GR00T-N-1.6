@@ -10,14 +10,7 @@ lerobot-teleoperate \
     --teleop.type=so101_leader \
     --teleop.port=/dev/ttyACM1 \
     --teleop.id=leader_arm \
-waypoint = {
-    "shoulder_pan.pos":   -3.271,
-    "shoulder_lift.pos":   12.028,
-    "elbow_flex.pos":  -20.273,
-    "wrist_flex.pos":   80.452,
-    "wrist_roll.pos":   45.690,
-    "gripper.pos":   24.119,
-}    --display_data=true
+    --display_data=true
 
 
 
@@ -30,9 +23,9 @@ lerobot-record \
     --teleop.port=/dev/ttyACM1 \
     --teleop.id=leader_arm \
     --display_data=true \
-    --dataset.repo_id=so101/cube_hybrid \
+    --dataset.repo_id=so101/shapes \
     --dataset.num_episodes=10 \
-    --dataset.single_task="red" \
+    --dataset.single_task="red cube" \
     --dataset.push_to_hub=false \
     --dataset.episode_time_s=6 \
     --dataset.reset_time_s=20 \
@@ -184,6 +177,106 @@ waypoint = {
 
 
 
+---
+
+
+
+
+
+lerobot-record \
+    --robot.type=so101_follower \
+    --robot.port=/dev/ttyACM0 \
+    --robot.id=follower_arm \
+    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30, fourcc: "MJPG"}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30, fourcc: "MJPG"}}" \
+    --teleop.type=so101_leader \
+    --teleop.port=/dev/ttyACM1 \
+    --teleop.id=leader_arm \
+    --display_data=true \
+    --dataset.repo_id=so101/shapes \
+    --dataset.num_episodes=10 \
+    --dataset.single_task="yellow cube" \
+    --dataset.push_to_hub=false \
+    --dataset.episode_time_s=6 \
+    --dataset.reset_time_s=20 \
+    --resume=true
+
+
+
+
+
+red cube    60  x
+orange cube 20  x
+yellow cube 60  
+pink cube   20
+blue cube   20
+green prism 60
+red ball    60
+yellow ball 20
+
+Total = 60 + 20 + 60 + 20 + 60 + 60 + 60 + 20 = 320 episodes
+
+--- 
+
+60 episodes per object
+
+The "Vanilla" Reaches (20 Episodes) - Teach the basic kinematics of reaching the object in plain sight.
+
+    Setup: Only the target object in the workspace. Completely empty otherwise.
+
+    Locations: Randomly scatter it across the CHECK_IN_ZONE and CHECK_OUT_ZONE. Do not favor the dead center. Place it in the top-left, bottom-right, dead middle, etc.
+
+    Rotations: Keep the object relatively "square" to the robot for these.
+
+
+Pose & Rotation Robustness (20 Episodes) - Teach the model that a cube at a 45-degree angle is still a cube, and how to angle the wrist roll to grasp it.
+
+    Setup: Single object, but actively mess with its rotation.
+
+    Execution:
+
+        For Cubes: Rotate them 30°, 45°, 60°. Your SO-100 wrist will need to roll to match the faces so the gripper fingers fit cleanly.
+
+        For the Green Prism: Lay it sideways, point it straight at the camera, point it diagonally.
+
+
+The "Shape vs. Color" Distractor Test (20 Episodes) - Force the language embedding to pay attention to both the color adjective AND the shape noun.
+
+    Setup: Place the target object alongside 1 or 2 distractors.
+
+    Combinations to record:
+
+        Same Color, Different Shape: Target = "red cube". Distractor = "red sphere". (Forces the model to learn "cube" vs "sphere").
+
+        Same Shape, Different Color: Target = "red cube". Distractor = "blue cube" or "pink cube". (Forces the model to look at the color).
+
+        Spacing: Sometimes put the distractor 10 inches away. Sometimes put it literally 1 inch away so the gripper has to squeeze past it.
+
+
+---
+
+For similar shapes variant
+
+The 20-Episode "Variant" Breakdown
+
+    5 Episodes - Vanilla/Basic Locations:
+
+        Setup: Just the Blue Cube by itself. Scatter it in a few different spots.
+
+        Purpose: Just to prove to the model that the Blue Cube can exist on its own in the workspace.
+
+    5 Episodes - Rotated:
+
+        Setup: Just the Blue Cube, but angled (30°, 45°).
+
+        Purpose: Confirms that the color features and the rotation features aren't mutually exclusive.
+
+    10 Episodes - The "Anti-Bias" Distractor Test (Crucial):
+
+        Setup: Put the Blue Cube AND the Red Cube in the scene together.
+
+        Prompt: "blue cube"
+
+        Purpose: This is the most important part of the 20 episodes. Because the model will have seen 60 Red Cubes, its first instinct when it hears "cube" will be to grab the red one. By forcing it to reach past the Red Cube to grab the Blue one 10 times, you ruthlessly train the color bias out of the model.
 
 
 
@@ -193,7 +286,19 @@ waypoint = {
 
 
 
-
-Want to add the following:
-- Zone Quadrant Placement
-- Retry Loop on Grasp Failure - Right now a timeout just returns. A retry loop would be more robust
+lerobot-record \
+    --robot.type=so101_follower \
+    --robot.port=/dev/ttyACM0 \
+    --robot.id=my_awesome_follower_arm \
+    --robot.cameras="{ front: {type: zed, fps: 30}, wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
+    --teleop.type=so101_leader \
+    --teleop.port=/dev/ttyACM1 \
+    --teleop.id=leader_arm \
+    --display_data=false \
+    --dataset.repo_id=so101/shapes \
+    --dataset.num_episodes=10 \
+    --dataset.single_task="yellow cube" \
+    --dataset.push_to_hub=false \
+    --dataset.episode_time_s=6 \
+    --dataset.reset_time_s=20 \
+    --resume=true
