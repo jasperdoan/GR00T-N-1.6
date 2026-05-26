@@ -415,6 +415,17 @@ class Gr00tN1d6Processor(BaseProcessor):
                     [image_transform(img) for img in images[view]]
                 )  # (T, C, H, W)
 
+        # Force all camera views to the same square size (handles non-square cameras
+        # like ZED where aspect ratios differ per view after SmallestMaxSize)
+        if temporal_stacked_images:
+            sizes = [(v.shape[-2], v.shape[-1]) for v in temporal_stacked_images.values()]
+            square = min(s for pair in sizes for s in pair)
+            for k, v in temporal_stacked_images.items():
+                h, w = v.shape[-2], v.shape[-1]
+                top = (h - square) // 2
+                left = (w - square) // 2
+                temporal_stacked_images[k] = v[..., top:top+square, left:left+square]
+
         for k, v in temporal_stacked_images.items():
             assert isinstance(k, str), f"{k} is not a string"
             assert isinstance(v, torch.Tensor), f"{v} is not a torch tensor"
