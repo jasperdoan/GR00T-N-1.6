@@ -12,7 +12,8 @@ from gr00t.data.types import (
 so100_config = {
     "video": ModalityConfig(
         delta_indices=[0],
-        modality_keys=["front", "wrist"],
+        modality_keys=["wrist"],
+        # modality_keys=["front", "wrist"],
     ),
     "state": ModalityConfig(
         delta_indices=[0],

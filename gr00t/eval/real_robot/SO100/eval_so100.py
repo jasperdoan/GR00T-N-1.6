@@ -193,7 +193,16 @@ def eval(cfg: EvalConfig):
                 tic = time.time()
                 obs = robot.get_observation()
                 obs["lang"] = target_object
+                obs.pop("front", None)
                 
+                # print("\n--- Observation Snapshot ---")
+                # for k, v in obs.items():
+                #     if hasattr(v, 'shape'): # For NumPy arrays/Tensors
+                #         print(f"  {k}: {type(v).__name__} shape={v.shape}")
+                #     else:
+                #         print(f"  {k}: {type(v).__name__} = {v}")
+                # print("----------------------------\n")
+
                 # ── Grasp Detection ──
                 if grasp_detector.update(obs):
                     print(f"\n✅ [GRASP CONFIRMED] {target_object.upper()} secured!")

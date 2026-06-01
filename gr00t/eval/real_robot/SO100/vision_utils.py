@@ -22,7 +22,7 @@ from constants import (
     WRIST_CONFIRM_FRAMES,
     VLA_GRASP_MIN_TIME,
     GRIPPER_OPEN_POS,
-    GRIPPER_TRANSPORT_MAX
+    GRIPPER_TRANSPORT_MIN
 )
 
 # =============================================================================
@@ -91,12 +91,12 @@ def check_task_success(
         area = cv2.contourArea(cnt)
         bx, by, bw, bh = cv2.boundingRect(cnt)
         
-        # touches_edge = (
-        #     bx <= edge_margin
-        #     or by <= edge_margin
-        #     or (bx + bw) >= (w - edge_margin)
-        #     or (by + bh) >= (h - edge_margin)
-        # )
+        touches_edge = (
+            bx <= edge_margin
+            or by <= edge_margin
+            or (bx + bw) >= (w - edge_margin)
+            or (by + bh) >= (h - edge_margin)
+        )
         
         if debug:
             print(f"  Contour {i}: Area={area}, TouchesEdge={touches_edge}")
@@ -178,7 +178,7 @@ class GraspDetector:
 
         # --- Signal C: Gripper STRICT Check ---
         gripper_pos = obs.get("gripper.pos", GRIPPER_OPEN_POS)
-        is_gripping = float(gripper_pos) <= GRIPPER_TRANSPORT_MAX
+        is_gripping = float(gripper_pos) >= GRIPPER_TRANSPORT_MIN   # inverted: closed = high angle
 
         frame_success = is_stable and has_object and is_gripping
         print(f'Grasp check: {frame_success} | stable: {is_stable} | has_obj: {has_object} (px diff: {presence_px}) | gripping: {is_gripping} (pos: {float(gripper_pos):.1f})')
@@ -227,7 +227,7 @@ class GraspDetector:
 
         # --- Signal B: Mechanical Gripper Check ---
         gripper_pos = float(obs.get("gripper.pos", GRIPPER_OPEN_POS))
-        is_gripping = gripper_pos <= GRIPPER_TRANSPORT_MAX
+        is_gripping = gripper_pos >= GRIPPER_TRANSPORT_MIN   # inverted: closed = high angle
 
         # --- Signal C: Color Blob Integrity ---
         safe_curr = _ensure_uint8(wrist_img)

@@ -6,9 +6,9 @@ SO100 Constants: Workspace zones, color ranges, home position, and scripted wayp
 # Workspace Zone Definitions (x, y, width, height) in front-camera pixels
 # =============================================================================
 
-STORAGE_ZONE   = (277, 168, 96, 94)
-CHECK_IN_ZONE  = (152, 103, 96, 95)
-CHECK_OUT_ZONE = (399, 100, 99, 97)
+STORAGE_ZONE   = (870, 519, 263, 234)
+CHECK_IN_ZONE  = (591, 359, 267, 217)
+CHECK_OUT_ZONE = (1137, 344, 257, 230)
 
 # =============================================================================
 # Language & Object Definitions
@@ -39,9 +39,10 @@ MIN_BLOB_AREA_PX = 100
 
 # Bounding box between gripper fingers from calibration
 WRIST_GRASP_ROI = (276, 293, 193, 186)
+# WRIST_GRASP_ROI = (133, 311, 413, 166)
 
 WRIST_PRESENCE_THR   = 50     # Pixel difference intensity to count as "changed" from baseline
-WRIST_MIN_PRESENCE_PX= 27500  # Min changed pixels to confirm an object is in the gripper
+WRIST_MIN_PRESENCE_PX= 10000  # Min changed pixels to confirm an object is in the gripper
 WRIST_STABILITY_THR  = 6.0    # Diff threshold; any pixel changing > X is "moving"
 WRIST_CONFIRM_FRAMES = 3      # Number of consecutive true frames required
 VLA_GRASP_MIN_TIME   = 1.0    # Seconds the VLA runs before checking for grasps
@@ -68,20 +69,21 @@ HOME_ACTION = {
     "shoulder_lift.pos": -60.0,
     "elbow_flex.pos":     60.0,
     "wrist_flex.pos":     60.0,
-    "wrist_roll.pos":     90.0,
-    "gripper.pos":        40.0,
+    "wrist_roll.pos":     0.0,
+    "gripper.pos":         2.0,   # open (inverted design)
 }
 
 # =============================================================================
 # Gripper State Thresholds
 # =============================================================================
 
-GRIPPER_OPEN_POS    = 40.0   # degrees — fully open
-GRIPPER_GRASP_POS   = 15.0   # degrees — expected closed-on-cube position
+GRIPPER_OPEN_POS    = 2.0    # degrees — fully open  (inverted design: low angle = open)
+GRIPPER_GRASP_POS   = 75.0   # degrees — good grasp on cube
 
-# Maximum gripper position allowed during transport.
-# Clamps the locked value so a slightly-open grasp (e.g. 22°) can't slip further.
-GRIPPER_TRANSPORT_MAX = GRIPPER_GRASP_POS + 5.0
+# Minimum gripper position allowed during transport.
+# Clamps the locked value so a slightly-slipped grasp (e.g. 68°) can't open further.
+# NOTE: Direction is inverted vs old design — closing is now HIGH angle, opening is LOW angle.
+GRIPPER_TRANSPORT_MIN = GRIPPER_GRASP_POS - 5.0   # 70.0°
 
 # =============================================================================
 # Task-Specific Ready / Approach Positions
