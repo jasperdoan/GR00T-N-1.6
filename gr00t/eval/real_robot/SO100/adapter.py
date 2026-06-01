@@ -8,6 +8,7 @@ expected input/output format.
 from typing import Any, Dict, List
 
 import numpy as np
+import cv2
 
 from constants import JOINT_NAMES
 
@@ -39,11 +40,21 @@ class So100Adapter:
     Policy outputs an action chunk which is decoded joint-by-joint.
     """
 
-    CAMERA_KEYS    = ["front", "wrist"]
+    CAMERA_KEYS    = ["wrist"]          # model retrained on wrist camera only; front stays connected for vision_utils
     LANGUAGE_KEY   = "annotation.human.task_description"
+    # IMAGE_SIZE     = 256
 
     def __init__(self, policy_client) -> None:
         self.policy = policy_client
+
+    # def _process_image(self, img: np.ndarray) -> np.ndarray:
+    #     """Performs center crop to square and resizes to IMAGE_SIZE."""
+    #     h, w = img.shape[:2]
+    #     min_dim = min(h, w)
+    #     start_h = (h - min_dim) // 2
+    #     start_w = (w - min_dim) // 2
+    #     crop = img[start_h : start_h + min_dim, start_w : start_w + min_dim]
+    #     return cv2.resize(crop, (self.IMAGE_SIZE, self.IMAGE_SIZE), interpolation=cv2.INTER_AREA)
 
     # -------------------------------------------------------------------------
     # Observation → Policy Input
@@ -62,7 +73,7 @@ class So100Adapter:
                 "gripper":    state[5:6],
             },
             "language": {
-                self.LANGUAGE_KEY: obs["lang"],  # color string only ("red" / "blue" / "yellow")
+                self.LANGUAGE_KEY: obs["lang"],  # canonical object string ("dice", "pink prism")
             },
         }
 

@@ -4,19 +4,24 @@ SO100 Motion Primitives
 Smooth trajectory execution between joint-space waypoints.
 
 Public API:
-  lerp_to_waypoint()       — smoothly move from current pose to a target dict.
-  move_to_home()           — convenience wrapper back to HOME_ACTION.
-  scripted_transport()     — full pick-to-place scripted sequence after grasp.
+  lerp_to_waypoint()     — smoothly interpolate from current pose to a target.
+  spline_trajectory()    — smooth Catmull-Rom path through multiple waypoints
+                           with continuous velocity at every intermediate point.
+  move_to_home()         — convenience wrapper back to HOME_ACTION.
+  move_to_ready()        — task-specific approach position, defined in constants.
+  scripted_transport()   — full pick-to-place sequence using spline_trajectory.
 """
 
 import time
-from typing import Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
 from constants import (
     CHECKOUT_PLACE,
+    GRIPPER_GRASP_POS,
     GRIPPER_OPEN_POS,
+    GRIPPER_TRANSPORT_MIN,
     HOME_ACTION,
     JOINT_NAMES,
     LERP_DURATION_DROP,
@@ -26,6 +31,7 @@ from constants import (
     LIFT_OVERRIDE,
     PLACE_VARIATION_DEG,
     POST_DROP_PAUSE,
+    READY_POSITIONS,
     STORAGE_PLACE,
 )
 
@@ -34,7 +40,18 @@ CONTROL_HZ = 30
 
 
 # =============================================================================
-# Core Lerp Engine
+# Exceptions
+# =============================================================================
+
+class GraspLostException(Exception):
+    """Raised when an object slips from the gripper during transit."""
+    def __init__(self, message: str, last_obs: Dict[str, Any]):
+        super().__init__(message)
+        self.last_obs = last_obs
+
+
+# =============================================================================
+# Core Lerp Engine  (Quintic Smoothstep)
 # =============================================================================
 
 def lerp_to_waypoint(
@@ -42,44 +59,51 @@ def lerp_to_waypoint(
     target: Dict[str, float],
     duration: float,
     fixed_joints: Optional[Dict[str, float]] = None,
+    monitor_callback: Optional[Callable[[Dict[str, Any]], bool]] = None,
 ) -> None:
     """
-    Smoothly interpolate from the robot's current joint positions to target
-    using a Smoothstep (ease-in/ease-out) curve.
+    Smoothly interpolate from the robot's current joint positions to *target*
+    using a Quintic Smoothstep curve.
+
+    Classic Smoothstep  (t² (3 − 2t))  zeroes velocity at endpoints but leaves
+    acceleration non-zero, creating a subtle snap at the start and finish.
+    Quintic Smoothstep  (6t⁵ − 15t⁴ + 10t³)  also zeroes *acceleration* at
+    both endpoints, yielding a perceptibly more natural, mechanical-wear-friendly
+    motion profile.
 
     Args:
-        robot:        LeRobot Robot instance with get_observation / send_action.
-        target:       Mapping of joint_name → target angle (degrees).
-                      Joints absent from target are held at their current value.
-        duration:     Total duration of the move in seconds.
-        fixed_joints: Optional overrides applied at every step regardless of
-                      interpolation (e.g. keep gripper closed during transport).
+        robot:            LeRobot Robot instance (get_observation / send_action).
+        target:           Mapping of joint_name → target angle (degrees).
+                          Joints absent from *target* are held at their current value.
+        duration:         Total duration of the move in seconds.
+        fixed_joints:     Optional overrides applied at every step regardless of
+                          interpolation (e.g. keep gripper closed during transport).
+        monitor_callback: Function evaluated every step. If it returns False, execution aborts.
     """
-    # Read the current state once at the start of the segment
     obs   = robot.get_observation()
     start = {j: float(obs.get(j, HOME_ACTION.get(j, 0.0))) for j in JOINT_NAMES}
-
-    # Merge: joints not in `target` stay at their current position
-    end = {**start, **target}
+    end   = {**start, **target}
 
     steps = max(2, int(duration * CONTROL_HZ))
 
     for step in range(steps):
         tic = time.time()
 
-        t     = step / (steps - 1)                   # 0.0 → 1.0
-        alpha = t * t * (3.0 - 2.0 * t)              # Smoothstep
+        t     = step / (steps - 1)                        # 0.0 → 1.0
+        alpha = t * t * t * (t * (t * 6.0 - 15.0) + 10.0)  # quintic smoothstep
 
-        action = {
-            j: start[j] + (end[j] - start[j]) * alpha
-            for j in JOINT_NAMES
-        }
+        action = {j: start[j] + (end[j] - start[j]) * alpha for j in JOINT_NAMES}
 
-        # Apply fixed overrides (e.g. keep gripper locked during transport)
         if fixed_joints:
             action.update(fixed_joints)
 
         robot.send_action(action)
+
+        # Monitor Transit Health (The "Oops" factor)
+        if monitor_callback is not None:
+            obs_now = robot.get_observation()
+            if not monitor_callback(obs_now):
+                raise GraspLostException("Grasp lost during linear interpolation.", obs_now)
 
         elapsed = time.time() - tic
         sleep_t = 1.0 / CONTROL_HZ - elapsed
@@ -88,7 +112,79 @@ def lerp_to_waypoint(
 
 
 # =============================================================================
-# Move
+# Catmull-Rom Spline Trajectory
+# =============================================================================
+
+def _catmull_rom(p0: float, p1: float, p2: float, p3: float, t: float) -> float:
+    """
+    Scalar Catmull-Rom interpolation between p1 and p2 at parameter t ∈ [0, 1].
+
+    The tangent at p1 is estimated as 0.5 * (p2 − p0) and at p2 as
+    0.5 * (p3 − p1), so velocity is continuous across segment boundaries —
+    the key property that eliminates stop-start jerk at intermediate waypoints.
+    """
+    return 0.5 * (
+          2.0 * p1
+        + (-p0 + p2) * t
+        + ( 2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t ** 2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t ** 3
+    )
+
+
+def arc_trajectory(
+    robot,
+    p_mid: Dict[str, float],
+    p_end: Dict[str, float],
+    duration: float,
+    fixed_joints: Optional[Dict[str, float]] = None,
+    monitor_callback: Optional[Callable[[Dict[str, Any]], bool]] = None,
+) -> None:
+    """
+    Executes a smooth Quadratic Bezier curve.
+    Instead of rigidly stopping at waypoints, this sweeps smoothly from the
+    current pose, pulls gracefully toward p_mid, and lands exactly at p_end.
+    """
+    obs = robot.get_observation()
+    p0 = {j: float(obs.get(j, HOME_ACTION.get(j, 0.0))) for j in JOINT_NAMES}
+    p1 = {**p0, **p_mid}
+    p2 = {**p0, **p_end}
+
+    steps = max(2, int(duration * CONTROL_HZ))
+    for step in range(steps):
+        tic = time.time()
+        
+        # Smoothstep time scaling for gentle acceleration/deceleration
+        t = step / (steps - 1)
+        t_smooth = t * t * (3.0 - 2.0 * t)
+
+        action = {}
+        for j in JOINT_NAMES:
+            # Quadratic Bezier formula
+            action[j] = (
+                ((1 - t_smooth) ** 2) * p0[j] +
+                2 * (1 - t_smooth) * t_smooth * p1[j] +
+                (t_smooth ** 2) * p2[j]
+            )
+
+        if fixed_joints:
+            action.update(fixed_joints)
+
+        robot.send_action(action)
+
+        # Monitor Transit Health
+        if monitor_callback is not None:
+            obs_now = robot.get_observation()
+            if not monitor_callback(obs_now):
+                raise GraspLostException("Grasp lost during arc trajectory.", obs_now)
+
+        elapsed = time.time() - tic
+        sleep_t = 1.0 / CONTROL_HZ - elapsed
+        if sleep_t > 0:
+            time.sleep(sleep_t)
+
+
+# =============================================================================
+# Named Moves
 # =============================================================================
 
 def move_to_home(robot, duration: float = LERP_DURATION_HOME) -> None:
@@ -97,88 +193,102 @@ def move_to_home(robot, duration: float = LERP_DURATION_HOME) -> None:
     lerp_to_waypoint(robot, HOME_ACTION, duration)
 
 
-def move_to_ready(robot, task, duration: float = LERP_DURATION_LIFT) -> None:
-    """Smoothly move the robot to the lift position."""
-    print(f">>> Moving to LIFT over {duration:.1f}s …")
-    angle = 36.2 if task == "check_in" else 0
+def move_to_ready(
+    robot, 
+    task_type: str, 
+    duration: float = LERP_DURATION_LIFT,
+    pan_override: Optional[float] = None
+) -> None:
+    """
+    Move to the task-specific approach / ready position.
 
-    d = {
-        "shoulder_pan.pos":  angle,
-        "shoulder_lift.pos": -21.1,
-        "elbow_flex.pos":    27.1,
-        "wrist_flex.pos":    78.4,
-    }
-    lerp_to_waypoint(robot, d, duration, fixed_joints={"gripper.pos": 40.0})
+    Target joints are looked up from constants.READY_POSITIONS[task_type].
+    If pan_override is provided, the robot will adopt the safe ready elevation
+    (lift/elbow/wrist) but hold the requested shoulder pan to look down at a custom area.
+    The gripper is always forced open (GRIPPER_OPEN_POS) throughout the move.
+
+    Args:
+        robot:        LeRobot Robot instance.
+        task_type:    Task identifier string, e.g. "check_in" or "check_out".
+        duration:     Move duration in seconds.
+        pan_override: Optional custom shoulder pan to use instead of the default.
+
+    Raises:
+        ValueError if task_type is not present in READY_POSITIONS.
+    """
+    base_target = READY_POSITIONS.get(task_type)
+    if base_target is None:
+        raise ValueError(
+            f"Unknown task_type '{task_type}'. "
+            f"Expected one of: {list(READY_POSITIONS.keys())}"
+        )
+        
+    target = base_target.copy()
+    if pan_override is not None:
+        target["shoulder_pan.pos"] = pan_override
+        
+    print(f">>> Moving to READY [{task_type}] over {duration:.1f}s …")
+    lerp_to_waypoint(
+        robot,
+        target,
+        duration,
+        fixed_joints={"gripper.pos": GRIPPER_OPEN_POS},
+    )
 
 
 # =============================================================================
 # Scripted Transport Sequence
 # =============================================================================
 
-def scripted_transport(robot, task_type: str, grasp_obs: Dict) -> None:
+def scripted_transport(
+    robot, 
+    task_type: str, 
+    grasp_obs: Dict, 
+    monitor_callback: Optional[Callable[[Dict[str, Any]], bool]] = None
+) -> None:
     """
-    Execute the deterministic pick-to-place trajectory after a confirmed grasp.
-
-    Sequence:
-      1. Lift vertically (keep pan, roll, gripper from grasp pose).
-      2. Rotate & approach placement zone (keep gripper closed).
-      3. Drop the cube (open gripper).
-      4. Pause briefly so the cube settles.
-      5. Lift back up (avoid collision with placed cube).
-      6. Return to Home.
-
-    Args:
-        robot:      LeRobot Robot instance.
-        task_type:  "check_in" → cube goes to STORAGE; "check_out" → CHECKOUT.
-        grasp_obs:  Observation dict captured at the moment grasp was confirmed.
-                    Used to read the locked gripper/wrist_roll from VLA's pose.
+    Execute the deterministic pick-to-place trajectory using fluid Bezier arcs.
+    Now actively monitored by monitor_callback to detect mid-air object drops.
     """
-    # --- Determine placement target ---
     place_waypoint = (
         STORAGE_PLACE.copy() if task_type == "check_in" else CHECKOUT_PLACE.copy()
     )
 
-    # Add small random variation to prevent repetitive mechanical wear
     rng = np.random.default_rng()
     for joint in ("shoulder_lift.pos", "elbow_flex.pos", "wrist_flex.pos"):
         place_waypoint[joint] += rng.uniform(-PLACE_VARIATION_DEG, PLACE_VARIATION_DEG)
 
-    # --- Lock gripper closed throughout transport ---
-    gripper_closed = float(grasp_obs.get("gripper.pos", 15.0))
+    raw_grip       = float(grasp_obs.get("gripper.pos", GRIPPER_GRASP_POS))
+    gripper_closed = max(raw_grip, GRIPPER_TRANSPORT_MIN)   # inverted: high = closed, so max clamps against opening
     transport_lock = {"gripper.pos": gripper_closed}
 
-    # ── Step 1: Lift up (pan and roll unchanged, gripper locked) ──────────────
-    print("  [Transport] Step 1/5 — Lifting arm vertically …")
-    lerp_to_waypoint(
+    # ── Phase A: Sweeping Arc (Lift to Place) ──
+    print("  [Transport] Phase A — Sweeping Arc to placement zone …")
+    arc_trajectory(
         robot,
-        LIFT_OVERRIDE,                   # only lift/elbow/wrist_flex change
-        LERP_DURATION_LIFT,
+        p_mid=LIFT_OVERRIDE,
+        p_end=place_waypoint,
+        duration=(LERP_DURATION_LIFT + LERP_DURATION_PLACE) * 0.8, # Speed up slightly
         fixed_joints=transport_lock,
+        monitor_callback=monitor_callback,  # Only applied while holding the object!
     )
 
-    # ── Step 2: Rotate & approach target zone ─────────────────────────────────
-    print("  [Transport] Step 2/5 — Rotating to placement zone …")
-    lerp_to_waypoint(
-        robot,
-        place_waypoint,
-        LERP_DURATION_PLACE,
-        fixed_joints=transport_lock,
-    )
-
-    # ── Step 3: Open gripper — release the cube ───────────────────────────────
-    print("  [Transport] Step 3/5 — Releasing cube …")
-    obs = robot.get_observation()
+    # ── Phase B: Open gripper ──
+    print("  [Transport] Phase B — Releasing cube …")
+    obs       = robot.get_observation()
     drop_pose = {j: float(obs.get(j, place_waypoint.get(j, 0.0))) for j in JOINT_NAMES}
     drop_pose["gripper.pos"] = GRIPPER_OPEN_POS
     lerp_to_waypoint(robot, drop_pose, LERP_DURATION_DROP)
 
-    # ── Step 4: Pause so the cube can settle ──────────────────────────────────
-    print(f"  [Transport] Step 4/5 — Pausing {POST_DROP_PAUSE:.1f}s …")
+    # ── Phase C: Settle pause ──
+    print(f"  [Transport] Phase C — Settling pause ({POST_DROP_PAUSE:.2f}s) …")
     time.sleep(POST_DROP_PAUSE)
 
-    # ── Step 5: Lift back up before returning home (avoid collision) ──────────
-    print("  [Transport] Step 5/5 — Lifting clear of placed cube …")
-    lerp_to_waypoint(robot, LIFT_OVERRIDE, LERP_DURATION_LIFT)
-
-    # ── Return to Home ────────────────────────────────────────────────────────
-    move_to_home(robot)
+    # ── Phase D: Sweeping Arc (Return Home) ──
+    print("  [Transport] Phase D — Sweeping Arc to home …")
+    arc_trajectory(
+        robot,
+        p_mid=LIFT_OVERRIDE,
+        p_end=HOME_ACTION,
+        duration=(LERP_DURATION_LIFT + LERP_DURATION_HOME) * 0.8,
+    )

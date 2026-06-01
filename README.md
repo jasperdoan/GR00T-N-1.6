@@ -35,7 +35,7 @@ python3 -m gr00t.experiment.launch_finetune \
     --output_dir ~/Desktop/models/so100_finetune \
     --save_steps 2500 \
     --save_total_limit 1 \
-    --max_steps 10000 \
+    --max_steps 5000 \
     --random_rotation_angle 5 \
     --warmup_ratio 0.1 \
     --state_dropout_prob 0.1 \

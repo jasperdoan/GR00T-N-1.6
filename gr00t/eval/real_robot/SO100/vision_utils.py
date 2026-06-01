@@ -1,9 +1,9 @@
 """
-SO100 Vision Utilities
+SO100 Vision Utilities (Signal-Based Tracking)
 
 Two independent detectors:
-  1. check_task_success  — confirms a cube is stably placed in a target zone.
-  2. GraspDetector       — multi-signal sequential detector using the wrist camera.
+  1. check_task_success  — confirms a new object is stably placed in a target zone using background subtraction.
+  2. GraspDetector       — Uses a robust Signal A-D logic for both initial grasp and mid-transit monitoring.
 """
 
 import collections
@@ -14,30 +14,20 @@ import cv2
 import numpy as np
 
 from constants import (
-    COLOR_RANGES,
     MIN_BLOB_AREA_PX,
     WRIST_GRASP_ROI,
-    WRIST_COLOR_RANGES,
-    WRIST_MIN_COLOR_PX,
+    WRIST_PRESENCE_THR,
+    WRIST_MIN_PRESENCE_PX,
     WRIST_STABILITY_THR,
     WRIST_CONFIRM_FRAMES,
     VLA_GRASP_MIN_TIME,
     GRIPPER_OPEN_POS,
+    GRIPPER_TRANSPORT_MIN
 )
-
 
 # =============================================================================
 # Internal Helpers
 # =============================================================================
-
-def _build_color_mask(hsv: np.ndarray, color_name: str, color_ranges: Dict) -> np.ndarray:
-    """Return a binary mask of pixels matching the named color from the provided dict."""
-    h, w = hsv.shape[:2]
-    mask = np.zeros((h, w), dtype=np.uint8)
-    for lower, upper in color_ranges.get(color_name,[]):
-        mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lower, upper))
-    return mask
-
 
 def _clean_mask(mask: np.ndarray, kernel_size: int = 5) -> np.ndarray:
     """Remove small noise blobs with a morphological open."""
@@ -45,50 +35,26 @@ def _clean_mask(mask: np.ndarray, kernel_size: int = 5) -> np.ndarray:
     return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
 
-def _color_pixel_count(image_arr: np.ndarray, color_name: str, color_ranges: Dict, debug_save: bool = False) -> int:
-    """Return the total number of pixels matching color_name in image_arr."""
-    # 1. Safeguard: handle float vs uint8
-    if image_arr.dtype != np.uint8:
-        img_uint8 = (image_arr * 255).clip(0, 255).astype(np.uint8)
-    else:
-        img_uint8 = image_arr.copy()
-
-    # 2. CHANGE THIS LINE: Use RGB2HSV because LeRobot/Camera is likely RGB
-    hsv = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2HSV)
-    
-    # 3. Build and clean mask
-    mask = _build_color_mask(hsv, color_name, color_ranges)
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    
-    # -------------------------------------------------------------------------
-    # DEBUG: Correct the image for saving so it looks normal on your PC
-    # -------------------------------------------------------------------------
-    if debug_save:
-        # To save an RGB image correctly with OpenCV, we must swap it back to BGR
-        save_ready = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2BGR)
-        cv2.imwrite("DEBUG_wrist_crop_color.jpg", save_ready)
-        cv2.imwrite("DEBUG_wrist_mask.jpg", mask)
-        
-    return int(np.sum(mask > 0))
+def _ensure_uint8(img: np.ndarray) -> np.ndarray:
+    if img.dtype != np.uint8:
+        return (img * 255).clip(0, 255).astype(np.uint8)
+    return img.copy()
 
 
 # =============================================================================
-# Task Success Detection (front camera, zone-based)
+# Task Success Detection (front camera, zone-based presence check)
 # =============================================================================
 
 def check_task_success(
     current_frame: np.ndarray,
     baseline_frame: np.ndarray,
     zone: Tuple[int, int, int, int],
-    color_name: str,
     diff_threshold: int = 25,
     edge_margin: int = 3,
     debug: bool = False,
 ) -> bool:
     """
-    Returns True when the target cube is stably placed inside zone.
-    Saves 'DEBUG_success_check.jpg' for visual inspection.
+    Returns True if a new object of sufficient size has appeared in the zone.
     """
     def to_uint8(img):
         if img.dtype != np.uint8:
@@ -108,25 +74,17 @@ def check_task_success(
     gray_diff = cv2.GaussianBlur(gray_diff, (5, 5), 0)
     _, diff_mask = cv2.threshold(gray_diff, diff_threshold, 255, cv2.THRESH_BINARY)
 
-    # --- Step 2: color mask ---
-    hsv        = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
-    color_mask = _build_color_mask(hsv, color_name, COLOR_RANGES)
+    # --- Step 2: Clean the mask ---
+    final_mask = _clean_mask(diff_mask)
 
-    # --- Step 3: intersection ---
-    final_mask = cv2.bitwise_and(color_mask, diff_mask)
-    final_mask = _clean_mask(final_mask)
-
-    # --- Step 4: contour analysis ---
+    # --- Step 3: contour analysis ---
     contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     found_valid_blob = False
-    best_area = 0
     
     if debug:
-        print(f"\n--- Vision Debug [{color_name.upper()}] ---")
-        print(f"Diff mask pixels: {np.sum(diff_mask > 0)}")
-        print(f"Color mask pixels: {np.sum(color_mask > 0)}")
-        print(f"Intersection pixels: {np.sum(final_mask > 0)}")
+        print(f"\n--- Vision Debug [Presence Check] ---")
+        print(f"Diff mask pixels: {np.sum(final_mask > 0)}")
         print(f"Contours found: {len(contours)}")
 
     for i, cnt in enumerate(contours):
@@ -143,37 +101,15 @@ def check_task_success(
         if debug:
             print(f"  Contour {i}: Area={area}, TouchesEdge={touches_edge}")
 
-        if area >= MIN_BLOB_AREA_PX and not touches_edge:
+        if area >= MIN_BLOB_AREA_PX:
             found_valid_blob = True
-            best_area = area
             break
 
-    # --- Step 5: Save Debug Image Mosaic ---
     if debug:
-        # Convert masks to 3-channel BGR so we can stack them with the crops
-        # Note: we use RGB2BGR because cv2.imwrite expects BGR
-        bgr_crop = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
-        bgr_base = cv2.cvtColor(base_crop, cv2.COLOR_RGB2BGR)
-        m1 = cv2.cvtColor(diff_mask, cv2.COLOR_GRAY2BGR)
-        m2 = cv2.cvtColor(color_mask, cv2.COLOR_GRAY2BGR)
-        m3 = cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR)
-        
-        # Draw the bounding box of the zone on the full frame for context
+        cv2.imwrite("DEBUG_success_diff.jpg", final_mask)
         full_debug = cv2.cvtColor(curr_u8, cv2.COLOR_RGB2BGR)
         cv2.rectangle(full_debug, (x, y), (x+w, y+h), (0, 255, 0), 2)
-        
-        # Create labels
-        def add_label(img, text):
-            return cv2.putText(img.copy(), text, (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-
-        row1 = np.hstack([add_label(bgr_base, "Baseline"), add_label(bgr_crop, "Current")])
-        row2 = np.hstack([add_label(m1, "Diff Mask"), add_label(m2, f"{color_name} Mask")])
-        row3 = np.hstack([add_label(m3, "Final Intersect"), np.zeros_like(bgr_crop)])
-        
-        mosaic = np.vstack([row1, row2, row3])
-        cv2.imwrite("DEBUG_success_check.jpg", mosaic)
         cv2.imwrite("DEBUG_full_frame.jpg", full_debug)
-        print(f"Debug images saved. Result: {found_valid_blob}")
 
     return found_valid_blob
 
@@ -184,20 +120,31 @@ def check_task_success(
 
 class GraspDetector:
     """
-    Stateful detector that ensures multi-signal verification holds for N frames.
-    Requires:
-      A) Image stability inside the gripper's bounding box (>= 75% still).
-      B) Color presence inside that ROI.
-      C) The gripper to NOT be fully open.
-      D) Time delay: giving the VLA >= 5 seconds to act.
+    Robust Signal A-D tracking logic. 
+    Handles both the initial grasp validation and the mid-transit drop checks.
     """
 
-    def __init__(self):
+    def __init__(self, baseline_wrist_img: np.ndarray):
+        # Initial Grasp Trackers
         self.history = collections.deque(maxlen=WRIST_CONFIRM_FRAMES)
         self.start_time = time.time()
         self.prev_gray = None
+        
+        # Mid-Transit Trackers
+        self.transit_start_time = 0.0
+        self.locked_color_mass = None
+        self.transit_lost_count = 0
+        self.roi_area = WRIST_GRASP_ROI[2] * WRIST_GRASP_ROI[3]
+        
+        safe_base = _ensure_uint8(baseline_wrist_img)
+        x, y, w, h = WRIST_GRASP_ROI
+        roi = safe_base[y:y+h, x:x+w]
+        self.baseline_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-    def update(self, obs: Dict[str, Any], color_name: str) -> bool:
+    # -------------------------------------------------------------------------
+    # Phase 1: Initial Grasp Validation
+    # -------------------------------------------------------------------------
+    def update(self, obs: Dict[str, Any]) -> bool:
         # --- Signal D: Time gating ---
         if time.time() - self.start_time < VLA_GRASP_MIN_TIME:
             self._update_prev_frame(obs)
@@ -209,39 +156,120 @@ class GraspDetector:
             self.history.append(False)
             return False
 
+        safe_curr = _ensure_uint8(wrist_img)
         x, y, w, h = WRIST_GRASP_ROI
-        roi_bgr = wrist_img[y:y+h, x:x+w]
-        curr_gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+        roi = safe_curr[y:y+h, x:x+w]
+        curr_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-        # --- Signal A: Stability check (% still) ---
+        # --- Signal A: Stability check (% still between frames) ---
         is_stable = False
         if self.prev_gray is not None:
-            diff = cv2.absdiff(curr_gray, self.prev_gray)
-            changed_pixels = np.sum(diff > WRIST_STABILITY_THR)
+            diff_motion = cv2.absdiff(curr_gray, self.prev_gray)
+            changed_pixels = np.sum(diff_motion > WRIST_STABILITY_THR)
             total_pixels = curr_gray.size
-            if (changed_pixels / total_pixels) <= 0.45:
+            if (changed_pixels / total_pixels) <= 0.15:
                 is_stable = True
         self.prev_gray = curr_gray
 
-        # --- Signal B: Color Presence ---
-        color_px = _color_pixel_count(roi_bgr, color_name, WRIST_COLOR_RANGES)
-        has_color = color_px >= WRIST_MIN_COLOR_PX
+        # --- Signal B: Visual Presence (Diff from empty baseline) ---
+        diff_presence = cv2.absdiff(curr_gray, self.baseline_gray)
+        presence_px = np.sum(diff_presence > WRIST_PRESENCE_THR)
+        has_object = presence_px >= WRIST_MIN_PRESENCE_PX
 
-        # --- Signal C: Gripper Loose Check ---
+        # --- Signal C: Gripper STRICT Check ---
         gripper_pos = obs.get("gripper.pos", GRIPPER_OPEN_POS)
-        is_gripping = float(gripper_pos) < (GRIPPER_OPEN_POS - 2.0)
+        is_gripping = float(gripper_pos) >= GRIPPER_TRANSPORT_MIN   # inverted: closed = high angle
 
-        frame_success = is_stable and has_color and is_gripping
-
-        print(f'Grasp detection frame: {frame_success} - is_stable: {is_stable}, has_color: {has_color} (px: {color_px}), is_gripping: {is_gripping}')
-
+        frame_success = is_stable and has_object and is_gripping
+        print(f'Grasp check: {frame_success} | stable: {is_stable} | has_obj: {has_object} (px diff: {presence_px}) | gripping: {is_gripping} (pos: {float(gripper_pos):.1f})')
+        
         self.history.append(frame_success)
         return len(self.history) == self.history.maxlen and all(self.history)
 
+    # -------------------------------------------------------------------------
+    # Phase 2: Transit Monitoring Setup
+    # -------------------------------------------------------------------------
+    def lock_grasp(self, obs: Dict[str, Any]):
+        """
+        Takes a snapshot of the object exactly when FSM confirms grasp.
+        Applies heavy blur to track the "Blob of Color" rather than sharp edges.
+        """
+        self.transit_start_time = time.time()
+        self.transit_lost_count = 0
+        
+        wrist_img: Optional[np.ndarray] = obs.get("wrist")
+        if wrist_img is not None:
+            safe_curr = _ensure_uint8(wrist_img)
+            x, y, w, h = WRIST_GRASP_ROI
+            roi = safe_curr[y:y+h, x:x+w]
+            
+            # Heavy 21x21 Gaussian Blur to eliminate edge/shift sensitivity
+            self.locked_color_mass = cv2.GaussianBlur(roi, (21, 21), 0)
+
+    # -------------------------------------------------------------------------
+    # Phase 3: Mid-Transit Drop Detection
+    # -------------------------------------------------------------------------
+    def check_grasp_maintained(self, obs: Dict[str, Any]) -> bool:
+        """
+        Monitors the grasp mid-transit using independent A-D signal logic.
+        """
+        # --- Signal A: Time Gating (Lift-off delay) ---
+        # Ignore checks for the first 0.5 seconds to let the arm clear the table
+        if time.time() - self.transit_start_time < 0.5:
+            return True
+
+        if self.locked_color_mass is None:
+            return True # Fallback if lock wasn't called properly
+
+        wrist_img: Optional[np.ndarray] = obs.get("wrist")
+        if wrist_img is None:
+            return True # Ignore single dropped camera frames
+
+        # --- Signal B: Mechanical Gripper Check ---
+        gripper_pos = float(obs.get("gripper.pos", GRIPPER_OPEN_POS))
+        is_gripping = gripper_pos >= GRIPPER_TRANSPORT_MIN   # inverted: closed = high angle
+
+        # --- Signal C: Color Blob Integrity ---
+        safe_curr = _ensure_uint8(wrist_img)
+        x, y, w, h = WRIST_GRASP_ROI
+        roi = safe_curr[y:y+h, x:x+w]
+        
+        # Heavily blur current frame to ignore shifting/shaking
+        curr_color_mass = cv2.GaussianBlur(roi, (21, 21), 0)
+        
+        # Compare to locked snapshot
+        diff = cv2.absdiff(curr_color_mass, self.locked_color_mass)
+        gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+        
+        # Generous threshold: Pixel must change by > 50 brightness levels to be "lost"
+        changed_px = np.sum(gray_diff > 50)
+        
+        # Object is safe if less than 50% of the ROI drastically changed color
+        is_visually_maintained = changed_px < (self.roi_area * 0.50)
+
+        # Evaluate this specific frame
+        frame_maintained = is_gripping and is_visually_maintained
+
+        # --- Signal D: Sequential Confirmation ---
+        # Require 3 consecutive bad frames to abort. This perfectly filters out 
+        # a split-second shadow or camera glare ruining the run.
+        if not frame_maintained:
+            self.transit_lost_count += 1
+            print(f"  [Transit Monitor] Warning: Drop detected (Frame {self.transit_lost_count}/3) | grip: {is_gripping} | visual: {is_visually_maintained} (Diff px: {changed_px})")
+        else:
+            self.transit_lost_count = 0  # Reset counter immediately on a good frame
+
+        # If it fails 3 times in a row, the object is truly gone
+        if self.transit_lost_count >= 3:
+            return False
+            
+        return True
+
     def _update_prev_frame(self, obs: Dict[str, Any]):
-        """Maintain tracking in the background while time-gated."""
+        """Maintain background tracking while initial check is time-gated."""
         wrist_img = obs.get("wrist")
         if wrist_img is not None:
+            safe_img = _ensure_uint8(wrist_img)
             x, y, w, h = WRIST_GRASP_ROI
-            roi_bgr = wrist_img[y:y+h, x:x+w]
-            self.prev_gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+            roi = safe_img[y:y+h, x:x+w]
+            self.prev_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
