@@ -289,8 +289,8 @@ The 20-Episode "Variant" Breakdown
 lerobot-record \
     --robot.type=so101_follower \
     --robot.port=/dev/ttyACM0 \
-    --robot.id=my_awesome_follower_arm \
-    --robot.cameras="{ front: {type: zed, fps: 30}, wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
+    --robot.id=follower_arm \
+    --robot.cameras="{wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
     --teleop.type=so101_leader \
     --teleop.port=/dev/ttyACM1 \
     --teleop.id=leader_arm \
@@ -299,6 +299,29 @@ lerobot-record \
     --dataset.num_episodes=10 \
     --dataset.single_task="yellow cube" \
     --dataset.push_to_hub=false \
-    --dataset.episode_time_s=6 \
+    --dataset.episode_time_s=8 \
     --dataset.reset_time_s=20 \
     --resume=true
+
+
+
+lerobot-calibrate \
+    --robot.type=so101_follower \
+    --robot.port=/dev/ttyACM0 \
+    --robot.id=follower_arm
+
+lerobot-calibrate \
+    --teleop.type=so101_leader \
+    --teleop.port=/dev/ttyACM1 \
+    --teleop.id=leader_arm
+
+
+lerobot-teleoperate \
+    --robot.type=so101_follower \
+    --robot.port=/dev/ttyACM0 \
+    --robot.id=follower_arm \
+    --teleop.type=so101_leader \
+    --teleop.port=/dev/ttyACM1 \
+    --teleop.id=leader_arm \
+    --robot.cameras="{wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
+    --display_data=true
