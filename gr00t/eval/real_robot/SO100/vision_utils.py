@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from constants import (
+    COLOR_RANGES,
     MIN_BLOB_AREA_PX,
     WRIST_GRASP_ROI,
     WRIST_PRESENCE_THR,
@@ -141,50 +142,95 @@ class GraspDetector:
         roi = safe_base[y:y+h, x:x+w]
         self.baseline_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
+    def extract_color_pixels(self, rgb_img: np.ndarray, target_object: str) -> int:
+        """Returns the number of pixels matching the target color (HSV filter) and saves debug info."""
+        
+        # FIX: LeRobot uses RGB, so we must use COLOR_RGB2HSV
+        hsv = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2HSV)
+        
+        # Get the color name from the instruction (e.g., "red" from "red cube")
+        color_name = target_object.split()[0].lower()
+        ranges = COLOR_RANGES.get(color_name, None)
+        
+        if not ranges:
+            print(f"[Vision Debug] ⚠️ Missing color '{color_name}' in COLOR_RANGES!")
+            return 0 # Fallback if color unknown
+
+        mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+        for (lower, upper) in ranges:
+            lower_np = np.array(lower, dtype=np.uint8)
+            upper_np = np.array(upper, dtype=np.uint8)
+            mask |= cv2.inRange(hsv, lower_np, upper_np)
+            
+        px_count = np.sum(mask > 0)
+
+        # ==========================================
+        # DEBUG VISUALIZER: Save images to disk
+        # ==========================================
+        # FIX: Convert the RGB image to BGR specifically so cv2.imwrite saves the colors correctly!
+        # bgr_for_saving = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)
+        
+        # cv2.imwrite("DEBUG_01_wrist_camera_raw.jpg", bgr_for_saving)
+        # cv2.imwrite(f"DEBUG_02_wrist_mask_{color_name}.jpg", mask)
+        
+        # # Draw text on the original image for easy debugging
+        # debug_img = bgr_for_saving.copy()
+        # cv2.putText(debug_img, f"Looking for: {color_name}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        # cv2.putText(debug_img, f"Found Px: {px_count}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if px_count > WRIST_MIN_PRESENCE_PX else (0, 0, 255), 2)
+        # cv2.imwrite("DEBUG_03_wrist_overlay.jpg", debug_img)
+        # ==========================================
+
+        return px_count
+
     # -------------------------------------------------------------------------
     # Phase 1: Initial Grasp Validation
     # -------------------------------------------------------------------------
-    def update(self, obs: Dict[str, Any]) -> bool:
+    def update(self, obs: Dict[str, Any], target_object: str) -> str:
+        """
+        Returns:
+          "SUCCESS": Grasp is stable and correct color.
+          "WRONG_OBJECT": Gripper closed on empty space or wrong color.
+          "SEARCHING": Still trying.
+        """
         # --- Signal D: Time gating ---
         if time.time() - self.start_time < VLA_GRASP_MIN_TIME:
             self._update_prev_frame(obs)
             self.history.append(False)
-            return False
+            return "SEARCHING"
 
         wrist_img: Optional[np.ndarray] = obs.get("wrist")
         if wrist_img is None:
             self.history.append(False)
-            return False
+            return "SEARCHING"
 
         safe_curr = _ensure_uint8(wrist_img)
         x, y, w, h = WRIST_GRASP_ROI
         roi = safe_curr[y:y+h, x:x+w]
-        curr_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-        # --- Signal A: Stability check (% still between frames) ---
-        is_stable = False
-        if self.prev_gray is not None:
-            diff_motion = cv2.absdiff(curr_gray, self.prev_gray)
-            changed_pixels = np.sum(diff_motion > WRIST_STABILITY_THR)
-            total_pixels = curr_gray.size
-            if (changed_pixels / total_pixels) <= 0.15:
-                is_stable = True
-        self.prev_gray = curr_gray
-
-        # --- Signal B: Visual Presence (Diff from empty baseline) ---
-        diff_presence = cv2.absdiff(curr_gray, self.baseline_gray)
-        presence_px = np.sum(diff_presence > WRIST_PRESENCE_THR)
-        has_object = presence_px >= WRIST_MIN_PRESENCE_PX
+        # --- Signal B: Visual Presence (Color Check instead of old Diff) ---
+        color_pixels = self.extract_color_pixels(roi, target_object)
+        has_correct_color = color_pixels >= WRIST_MIN_PRESENCE_PX
 
         # --- Signal C: Gripper STRICT Check ---
         gripper_pos = obs.get("gripper.pos", GRIPPER_OPEN_POS)
         is_gripping = float(gripper_pos) >= GRIPPER_TRANSPORT_MIN   # inverted: closed = high angle
 
-        frame_success = is_stable and has_object and is_gripping
-        print(f'Grasp check: {frame_success} | stable: {is_stable} | has_obj: {has_object} (px diff: {presence_px}) | gripping: {is_gripping} (pos: {float(gripper_pos):.1f})')
+        # --- Decision Logic ---
+        if is_gripping and not has_correct_color:
+            # The VLA grabbed something, but it's not our target color!
+            print(f"[Vision] 🚨 WRONG OBJECT GRASPED! Expected {target_object}. Found only {color_pixels}px.")
+            return "WRONG_OBJECT"
+
+        # (Frame logic is simple: Gripping correctly and has right color)
+        frame_success = is_gripping and has_correct_color
+        print(f'Grasp check: {frame_success} | has_color: {has_correct_color} (px: {color_pixels}) | gripping: {is_gripping} (pos: {float(gripper_pos):.1f})')
         
         self.history.append(frame_success)
-        return len(self.history) == self.history.maxlen and all(self.history)
+        
+        if len(self.history) == self.history.maxlen and all(self.history):
+            return "SUCCESS"
+            
+        return "SEARCHING"
 
     # -------------------------------------------------------------------------
     # Phase 2: Transit Monitoring Setup

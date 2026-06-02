@@ -194,17 +194,11 @@ def eval(cfg: EvalConfig):
                 obs = robot.get_observation()
                 obs["lang"] = target_object
                 obs.pop("front", None)
-                
-                # print("\n--- Observation Snapshot ---")
-                # for k, v in obs.items():
-                #     if hasattr(v, 'shape'): # For NumPy arrays/Tensors
-                #         print(f"  {k}: {type(v).__name__} shape={v.shape}")
-                #     else:
-                #         print(f"  {k}: {type(v).__name__} = {v}")
-                # print("----------------------------\n")
 
                 # ── Grasp Detection ──
-                if grasp_detector.update(obs):
+                grasp_status = grasp_detector.update(obs, target_object)
+                
+                if grasp_status == "SUCCESS":
                     print(f"\n✅ [GRASP CONFIRMED] {target_object.upper()} secured!")
                     grasp_obs = obs
                     # Take visual snapshot of object for transit monitoring
@@ -213,6 +207,31 @@ def eval(cfg: EvalConfig):
                     recovery_pan = None 
                     state = FSMState.TRANSPORT
                     break
+                    
+                elif grasp_status == "WRONG_OBJECT":
+                    print("\n⚠️ [FSM: Early Abort] VLA grabbed the wrong object or empty space!")
+                    log_say("Wrong object detected. Resetting.", cfg.play_sounds)
+                    
+                    # Pop the gripper open safely
+                    drop_pose = {j: float(obs.get(j, 0.0)) for j in JOINT_NAMES}
+                    drop_pose["gripper.pos"] = GRIPPER_OPEN_POS
+                    lerp_to_waypoint(robot, drop_pose, 0.5)
+                    
+                    # Force a retry immediately instead of waiting for timeout
+                    search_retries += 1
+                    
+                    if search_retries > cfg.max_retries:
+                        print("[FSM] Max retries exceeded. Task failed.")
+                        state = FSMState.FAILED
+                        break
+                    else:
+                        print(f"[FSM] Retrying ({search_retries}/{cfg.max_retries}). Resetting view.")
+                        move_to_home(robot)
+                        move_to_ready(robot, task_type)
+                        start_time = time.time()
+                        grasp_detector.start_time = time.time()
+                        runner.reset()
+                        continue
                 
                 # ── Action Execution ──
                 action = runner.step(obs)

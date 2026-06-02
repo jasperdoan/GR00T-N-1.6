@@ -38,6 +38,8 @@ from constants import (
 # Target control frequency (Hz)
 CONTROL_HZ = 30
 
+# Global drop counter to organize objects in a grid
+_drop_counter = 0
 
 # =============================================================================
 # Exceptions
@@ -250,9 +252,27 @@ def scripted_transport(
     Execute the deterministic pick-to-place trajectory using fluid Bezier arcs.
     Now actively monitored by monitor_callback to detect mid-air object drops.
     """
-    place_waypoint = (
+    global _drop_counter
+    
+    base_waypoint = (
         STORAGE_PLACE.copy() if task_type == "check_in" else CHECKOUT_PLACE.copy()
     )
+
+    # ── Calculate Grid Offset ──
+    # Create a 2x2 grid of drop points to prevent stacking collisions
+    grid_offsets = [
+        {"shoulder_pan.pos": 0.0,  "wrist_flex.pos": 0.0},    # Center
+        {"shoulder_pan.pos": 5.0,  "wrist_flex.pos": 0.0},    # Right
+        {"shoulder_pan.pos": -5.0, "wrist_flex.pos": 0.0},    # Left
+        {"shoulder_pan.pos": 0.0,  "wrist_flex.pos": 5.0},    # Further forward
+    ]
+    
+    offset = grid_offsets[_drop_counter % len(grid_offsets)]
+    place_waypoint = base_waypoint.copy()
+    place_waypoint["shoulder_pan.pos"] += offset["shoulder_pan.pos"]
+    place_waypoint["wrist_flex.pos"] += offset["wrist_flex.pos"]
+    
+    _drop_counter += 1 # Increment for the next run!
 
     rng = np.random.default_rng()
     for joint in ("shoulder_lift.pos", "elbow_flex.pos", "wrist_flex.pos"):

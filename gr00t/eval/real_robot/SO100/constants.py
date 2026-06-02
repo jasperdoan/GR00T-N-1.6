@@ -27,6 +27,23 @@ KNOWN_OBJECTS = [
 ]
 
 # =============================================================================
+# HSV Color Ranges for Vision Tracking (Hue, Saturation, Value)
+# Ranges are (Lower Bound), (Upper Bound). Red needs two ranges because it wraps around 180.
+# =============================================================================
+
+COLOR_RANGES = {
+    "black":  [((0, 0, 0), (180, 255, 65))],
+    "white":  [((0, 0, 160), (180, 60, 255))],
+    "gray":   [((0, 0, 66), (180, 65, 159))],
+    "red":    [((0, 66, 50), (10, 255, 255)), ((160, 66, 50), (180, 255, 255))], 
+    "yellow": [((15, 66, 50), (45, 255, 255))],
+    "blue":   [((95, 66, 50), (130, 255, 255))],
+    "green":  [((46, 66, 50), (94, 255, 255))],
+    "purple": [((131, 66, 50), (160, 255, 255))],
+    "orange": [((10, 66, 50), (20, 255, 255))], 
+}
+
+# =============================================================================
 # Front Camera Task Success Verification Constants
 # =============================================================================
 
@@ -36,9 +53,7 @@ MIN_BLOB_AREA_PX = 100
 # =============================================================================
 # Wrist Camera Grasp Verification Constants
 # =============================================================================
-
-# Bounding box between gripper fingers from calibration
-WRIST_GRASP_ROI = (276, 293, 193, 186)
+WRIST_GRASP_ROI = (164, 362, 346, 117)
 # WRIST_GRASP_ROI = (133, 311, 413, 166)
 
 WRIST_PRESENCE_THR   = 50     # Pixel difference intensity to count as "changed" from baseline
@@ -95,15 +110,15 @@ GRIPPER_TRANSPORT_MIN = GRIPPER_GRASP_POS - 5.0   # 70.0°
 READY_POSITIONS = {
     "check_in": {
         "shoulder_pan.pos":   36.2,
-        "shoulder_lift.pos": -21.1,
-        "elbow_flex.pos":     27.1,
-        "wrist_flex.pos":     78.4,
+        "shoulder_lift.pos":  -35.1,
+        "elbow_flex.pos":     28.1,
+        "wrist_flex.pos":     68.4,
     },
     "check_out": {
         "shoulder_pan.pos":    0.0,
-        "shoulder_lift.pos": -21.1,
-        "elbow_flex.pos":     27.1,
-        "wrist_flex.pos":     78.4,
+        "shoulder_lift.pos":  -35.1,
+        "elbow_flex.pos":     28.1,
+        "wrist_flex.pos":     68.4,
     },
 }
 
@@ -120,17 +135,17 @@ LIFT_OVERRIDE = {
 STORAGE_PLACE = {
     "shoulder_pan.pos":   0.0,
     "shoulder_lift.pos": 19.5,
-    "elbow_flex.pos":   -12.1,
+    "elbow_flex.pos":   -2.1,
     "wrist_flex.pos":    72.6,
-    "wrist_roll.pos":    63.8,
+    "wrist_roll.pos":    33.8,
 }
 
 CHECKOUT_PLACE = {
     "shoulder_pan.pos":  -50.2,
     "shoulder_lift.pos": 19.5,
-    "elbow_flex.pos":   -12.1,
+    "elbow_flex.pos":   -2.1,
     "wrist_flex.pos":    72.6,
-    "wrist_roll.pos":    63.8,
+    "wrist_roll.pos":    33.8,
 }
 
 PLACE_VARIATION_DEG = 2.0   # uniform random in [-X, +X] degrees per joint
