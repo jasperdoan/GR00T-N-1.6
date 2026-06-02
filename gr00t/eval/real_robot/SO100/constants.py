@@ -109,16 +109,16 @@ GRIPPER_TRANSPORT_MIN = GRIPPER_GRASP_POS - 5.0   # 70.0°
 
 READY_POSITIONS = {
     "check_in": {
-        "shoulder_pan.pos":   36.2,
-        "shoulder_lift.pos":  -35.1,
-        "elbow_flex.pos":     28.1,
-        "wrist_flex.pos":     68.4,
+        "shoulder_pan.pos":   45.0,
+        "shoulder_lift.pos": -65.0,
+        "elbow_flex.pos":     60.0,
+        "wrist_flex.pos":     72.0,
     },
     "check_out": {
         "shoulder_pan.pos":    0.0,
-        "shoulder_lift.pos":  -35.1,
-        "elbow_flex.pos":     28.1,
-        "wrist_flex.pos":     68.4,
+        "shoulder_lift.pos": -60.0,
+        "elbow_flex.pos":     60.0,
+        "wrist_flex.pos":     45.0,
     },
 }
 
