@@ -21,13 +21,12 @@ from lerobot.robots import so100_follower  # noqa: F401
 from lerobot.robots import so101_follower  # noqa: F401
 from lerobot.utils.utils import init_logging, log_say
 
-from adapter        import So100Adapter
-from motion         import move_to_home
-from policy_runner  import AsyncPolicyRunner
-from vision_utils   import GraspDetector
-
-from nlp_parser     import parse_instruction
-from fsm_controller import EvaluationFSM, FSMState
+from utils.adapter        import So100Adapter
+from utils.motion         import move_to_home
+from utils.policy_runner  import AsyncPolicyRunner
+from utils.vision_utils   import GraspDetector
+from utils.nlp_parser     import parse_instruction
+from utils.fsm_controller import EvaluationFSM, FSMState
 
 @dataclass
 class EvalConfig:
@@ -37,7 +36,7 @@ class EvalConfig:
     action_horizon:    int   = 16
     lang_instruction:  str   = "Check in red cube"
     play_sounds:       bool  = False
-    vla_timeout:       int   = 15    
+    vla_timeout:       int   = 10    
     max_retries:       int   = 2     
     replan_every:      int   = 6
     ensemble_temp:     float = 0.1

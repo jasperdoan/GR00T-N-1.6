@@ -8,12 +8,12 @@ Two independent detectors:
 
 import collections
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import cv2
 import numpy as np
 
-from constants import (
+from utils.constants import (
     COLOR_RANGES,
     MIN_BLOB_AREA_PX,
     FRONT_MIN_PRESENCE_PX,
@@ -147,6 +147,50 @@ def check_color_presence_front(
         cv2.imwrite(f"DEBUG_front_precheck_{color_name}_raw.jpg", bgr)
         
     return is_present, px_count
+
+
+# =============================================================================
+# Detection of ALL objects in a zone (front camera)
+# =============================================================================
+
+
+def detect_all_objects_in_zone(front_img: np.ndarray, zone: Tuple[int, int, int, int], debug: bool = False) -> List[str]:
+    """
+    Scans a zone for known colors, returning a list of object prompt strings 
+    (e.g., ['red cube', 'blue cube']).
+    """
+    img_u8 = _ensure_uint8(front_img)
+    x, y, w, h = zone
+    crop = img_u8[y:y+h, x:x+w]
+    
+    hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+    hsv = _enhance_saturation(hsv, factor=1.4)
+    
+    detected_objects = []
+    
+    for color_name, ranges in COLOR_RANGES.items():
+        # Exclude tracking background colors
+        if color_name in ["black", "white", "gray", "purple"]: 
+            continue
+            
+        mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+        for (lower, upper) in ranges:
+            lower_np = np.array(lower, dtype=np.uint8)
+            upper_np = np.array(upper, dtype=np.uint8)
+            mask |= cv2.inRange(hsv, lower_np, upper_np)
+        
+        mask = _clean_mask(mask)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for cnt in contours:
+            if cv2.contourArea(cnt) >= MIN_BLOB_AREA_PX:
+                # Map the color to the canonical object name
+                if color_name == "green":
+                    detected_objects.append("green prism")
+                else:
+                    detected_objects.append(f"{color_name} cube")
+                    
+    return detected_objects
 
 
 # =============================================================================

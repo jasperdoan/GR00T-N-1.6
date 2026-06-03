@@ -10,7 +10,7 @@ from typing import Any, Dict, List
 import numpy as np
 import cv2
 
-from constants import JOINT_NAMES
+from utils.constants import JOINT_NAMES
 
 
 def _recursive_add_extra_dim(obs: Dict) -> Dict:

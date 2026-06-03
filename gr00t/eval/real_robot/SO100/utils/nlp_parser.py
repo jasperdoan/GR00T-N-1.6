@@ -6,7 +6,7 @@ Extracts task type, target object, source zone, and target zone from free-text i
 import re
 from typing import Tuple
 
-from constants import KNOWN_OBJECTS, CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE
+from utils.constants import KNOWN_OBJECTS, CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE
 
 TASK_SYNONYMS = {
     "check_out": ["out", "retrieve", "get", "fetch", "checkout"],

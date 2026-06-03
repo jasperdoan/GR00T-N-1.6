@@ -7,8 +7,8 @@ from enum import Enum, auto
 
 from lerobot.utils.utils import log_say
 
-from constants import JOINT_NAMES, GRIPPER_OPEN_POS
-from motion import (
+from utils.constants import JOINT_NAMES, GRIPPER_OPEN_POS
+from utils.motion import (
     move_to_home,
     move_to_ready,
     scripted_transport,
@@ -16,7 +16,7 @@ from motion import (
     execute_failure_shake,
     GraspLostException
 )
-from vision_utils import check_task_success, check_color_presence_front
+from utils.vision_utils import check_task_success, check_color_presence_front
 
 
 class FSMState(Enum):

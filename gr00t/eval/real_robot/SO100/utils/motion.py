@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
-from constants import (
+from utils.constants import (
     CHECKOUT_PLACE,
     GRIPPER_GRASP_POS,
     GRIPPER_OPEN_POS,
