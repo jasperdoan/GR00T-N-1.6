@@ -16,6 +16,7 @@ import numpy as np
 from constants import (
     COLOR_RANGES,
     MIN_BLOB_AREA_PX,
+    FRONT_MIN_PRESENCE_PX,
     WRIST_GRASP_ROI,
     WRIST_PRESENCE_THR,
     WRIST_MIN_PRESENCE_PX,
@@ -41,6 +42,15 @@ def _ensure_uint8(img: np.ndarray) -> np.ndarray:
         return (img * 255).clip(0, 255).astype(np.uint8)
     return img.copy()
 
+def _enhance_saturation(hsv_img: np.ndarray, factor: float = 1.3) -> np.ndarray:
+    """
+    Boosts the saturation channel by a scalar to fix dull webcams/ZED feeds.
+    This prevents dull pinks/oranges from looking 'white/gray' enough to bleed into the Red mask.
+    """
+    h, s, v = cv2.split(hsv_img)
+    # Multiply saturation and clip to valid 0-255 range
+    s = np.clip(s * factor, 0, 255).astype(np.uint8)
+    return cv2.merge([h, s, v])
 
 # =============================================================================
 # Task Success Detection (front camera, zone-based presence check)
@@ -57,28 +67,19 @@ def check_task_success(
     """
     Returns True if a new object of sufficient size has appeared in the zone.
     """
-    def to_uint8(img):
-        if img.dtype != np.uint8:
-            return (img * 255).clip(0, 255).astype(np.uint8)
-        return img
-
-    curr_u8 = to_uint8(current_frame)
-    base_u8 = to_uint8(baseline_frame)
+    curr_u8 = _ensure_uint8(current_frame)
+    base_u8 = _ensure_uint8(baseline_frame)
 
     x, y, w, h = zone
     crop      = curr_u8[y : y + h, x : x + w]
     base_crop = base_u8[y : y + h, x : x + w]
 
-    # --- Step 1: background subtraction ---
     diff      = cv2.absdiff(crop, base_crop)
     gray_diff = cv2.cvtColor(diff, cv2.COLOR_RGB2GRAY)
     gray_diff = cv2.GaussianBlur(gray_diff, (5, 5), 0)
     _, diff_mask = cv2.threshold(gray_diff, diff_threshold, 255, cv2.THRESH_BINARY)
 
-    # --- Step 2: Clean the mask ---
     final_mask = _clean_mask(diff_mask)
-
-    # --- Step 3: contour analysis ---
     contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     found_valid_blob = False
@@ -90,18 +91,6 @@ def check_task_success(
 
     for i, cnt in enumerate(contours):
         area = cv2.contourArea(cnt)
-        bx, by, bw, bh = cv2.boundingRect(cnt)
-        
-        touches_edge = (
-            bx <= edge_margin
-            or by <= edge_margin
-            or (bx + bw) >= (w - edge_margin)
-            or (by + bh) >= (h - edge_margin)
-        )
-        
-        if debug:
-            print(f"  Contour {i}: Area={area}, TouchesEdge={touches_edge}")
-
         if area >= MIN_BLOB_AREA_PX:
             found_valid_blob = True
             break
@@ -113,6 +102,51 @@ def check_task_success(
         cv2.imwrite("DEBUG_full_frame.jpg", full_debug)
 
     return found_valid_blob
+
+# =============================================================================
+# Target Presence Pre-Check (front camera)
+# =============================================================================
+
+def check_color_presence_front(
+    front_img: np.ndarray, 
+    target_object: str, 
+    zone: Tuple[int, int, int, int], 
+    debug: bool = False
+) -> Tuple[bool, int]:
+    """
+    Checks if the target color exists inside the specific requested zone.
+    """
+    img_u8 = _ensure_uint8(front_img)
+    x, y, w, h = zone
+    crop = img_u8[y:y+h, x:x+w]
+    
+    hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+    hsv = _enhance_saturation(hsv, factor=1.4)  # Boost saturation to separate colors
+    
+    color_name = target_object.split()[0].lower()
+    ranges = COLOR_RANGES.get(color_name, None)
+    
+    if not ranges:
+        print(f"[Vision Debug] ⚠️ Missing color '{color_name}' in COLOR_RANGES!")
+        return False, 0
+        
+    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+    for (lower, upper) in ranges:
+        lower_np = np.array(lower, dtype=np.uint8)
+        upper_np = np.array(upper, dtype=np.uint8)
+        mask |= cv2.inRange(hsv, lower_np, upper_np)
+        
+    px_count = int(np.sum(mask > 0))
+    is_present = px_count >= FRONT_MIN_PRESENCE_PX
+    
+    print(f"[Vision] Pre-check for '{color_name}' in {zone}: Found {px_count} px (Threshold: {FRONT_MIN_PRESENCE_PX})")
+    
+    if debug:
+        cv2.imwrite(f"DEBUG_front_precheck_{color_name}_mask.jpg", mask)
+        bgr = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(f"DEBUG_front_precheck_{color_name}_raw.jpg", bgr)
+        
+    return is_present, px_count
 
 
 # =============================================================================
@@ -126,12 +160,10 @@ class GraspDetector:
     """
 
     def __init__(self, baseline_wrist_img: np.ndarray):
-        # Initial Grasp Trackers
         self.history = collections.deque(maxlen=WRIST_CONFIRM_FRAMES)
         self.start_time = time.time()
         self.prev_gray = None
         
-        # Mid-Transit Trackers
         self.transit_start_time = 0.0
         self.locked_color_mass = None
         self.transit_lost_count = 0
@@ -143,18 +175,14 @@ class GraspDetector:
         self.baseline_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
     def extract_color_pixels(self, rgb_img: np.ndarray, target_object: str) -> int:
-        """Returns the number of pixels matching the target color (HSV filter) and saves debug info."""
-        
-        # FIX: LeRobot uses RGB, so we must use COLOR_RGB2HSV
         hsv = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2HSV)
+        hsv = _enhance_saturation(hsv, factor=1.4)  # Boost saturation here too!
         
-        # Get the color name from the instruction (e.g., "red" from "red cube")
         color_name = target_object.split()[0].lower()
         ranges = COLOR_RANGES.get(color_name, None)
         
         if not ranges:
-            print(f"[Vision Debug] ⚠️ Missing color '{color_name}' in COLOR_RANGES!")
-            return 0 # Fallback if color unknown
+            return 0 
 
         mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
         for (lower, upper) in ranges:
@@ -162,29 +190,8 @@ class GraspDetector:
             upper_np = np.array(upper, dtype=np.uint8)
             mask |= cv2.inRange(hsv, lower_np, upper_np)
             
-        px_count = np.sum(mask > 0)
+        return np.sum(mask > 0)
 
-        # ==========================================
-        # DEBUG VISUALIZER: Save images to disk
-        # ==========================================
-        # FIX: Convert the RGB image to BGR specifically so cv2.imwrite saves the colors correctly!
-        # bgr_for_saving = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)
-        
-        # cv2.imwrite("DEBUG_01_wrist_camera_raw.jpg", bgr_for_saving)
-        # cv2.imwrite(f"DEBUG_02_wrist_mask_{color_name}.jpg", mask)
-        
-        # # Draw text on the original image for easy debugging
-        # debug_img = bgr_for_saving.copy()
-        # cv2.putText(debug_img, f"Looking for: {color_name}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        # cv2.putText(debug_img, f"Found Px: {px_count}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if px_count > WRIST_MIN_PRESENCE_PX else (0, 0, 255), 2)
-        # cv2.imwrite("DEBUG_03_wrist_overlay.jpg", debug_img)
-        # ==========================================
-
-        return px_count
-
-    # -------------------------------------------------------------------------
-    # Phase 1: Initial Grasp Validation
-    # -------------------------------------------------------------------------
     def update(self, obs: Dict[str, Any], target_object: str) -> str:
         """
         Returns:
@@ -213,11 +220,10 @@ class GraspDetector:
 
         # --- Signal C: Gripper STRICT Check ---
         gripper_pos = obs.get("gripper.pos", GRIPPER_OPEN_POS)
-        is_gripping = float(gripper_pos) >= GRIPPER_TRANSPORT_MIN   # inverted: closed = high angle
+        is_gripping = float(gripper_pos) >= GRIPPER_TRANSPORT_MIN  
 
         # --- Decision Logic ---
         if is_gripping and not has_correct_color:
-            # The VLA grabbed something, but it's not our target color!
             print(f"[Vision] 🚨 WRONG OBJECT GRASPED! Expected {target_object}. Found only {color_pixels}px.")
             return "WRONG_OBJECT"
 
@@ -232,9 +238,6 @@ class GraspDetector:
             
         return "SEARCHING"
 
-    # -------------------------------------------------------------------------
-    # Phase 2: Transit Monitoring Setup
-    # -------------------------------------------------------------------------
     def lock_grasp(self, obs: Dict[str, Any]):
         """
         Takes a snapshot of the object exactly when FSM confirms grasp.
@@ -252,9 +255,6 @@ class GraspDetector:
             # Heavy 21x21 Gaussian Blur to eliminate edge/shift sensitivity
             self.locked_color_mass = cv2.GaussianBlur(roi, (21, 21), 0)
 
-    # -------------------------------------------------------------------------
-    # Phase 3: Mid-Transit Drop Detection
-    # -------------------------------------------------------------------------
     def check_grasp_maintained(self, obs: Dict[str, Any]) -> bool:
         """
         Monitors the grasp mid-transit using independent A-D signal logic.
@@ -265,15 +265,15 @@ class GraspDetector:
             return True
 
         if self.locked_color_mass is None:
-            return True # Fallback if lock wasn't called properly
+            return True 
 
         wrist_img: Optional[np.ndarray] = obs.get("wrist")
         if wrist_img is None:
-            return True # Ignore single dropped camera frames
+            return True 
 
         # --- Signal B: Mechanical Gripper Check ---
         gripper_pos = float(obs.get("gripper.pos", GRIPPER_OPEN_POS))
-        is_gripping = gripper_pos >= GRIPPER_TRANSPORT_MIN   # inverted: closed = high angle
+        is_gripping = gripper_pos >= GRIPPER_TRANSPORT_MIN   
 
         # --- Signal C: Color Blob Integrity ---
         safe_curr = _ensure_uint8(wrist_img)
@@ -293,7 +293,6 @@ class GraspDetector:
         # Object is safe if less than 50% of the ROI drastically changed color
         is_visually_maintained = changed_px < (self.roi_area * 0.50)
 
-        # Evaluate this specific frame
         frame_maintained = is_gripping and is_visually_maintained
 
         # --- Signal D: Sequential Confirmation ---
@@ -303,7 +302,7 @@ class GraspDetector:
             self.transit_lost_count += 1
             print(f"  [Transit Monitor] Warning: Drop detected (Frame {self.transit_lost_count}/3) | grip: {is_gripping} | visual: {is_visually_maintained} (Diff px: {changed_px})")
         else:
-            self.transit_lost_count = 0  # Reset counter immediately on a good frame
+            self.transit_lost_count = 0  
 
         # If it fails 3 times in a row, the object is truly gone
         if self.transit_lost_count >= 3:

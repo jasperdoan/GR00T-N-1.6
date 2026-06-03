@@ -6,9 +6,9 @@ SO100 Constants: Workspace zones, color ranges, home position, and scripted wayp
 # Workspace Zone Definitions (x, y, width, height) in front-camera pixels
 # =============================================================================
 
-STORAGE_ZONE   = (870, 519, 263, 234)
-CHECK_IN_ZONE  = (591, 359, 267, 217)
-CHECK_OUT_ZONE = (1137, 344, 257, 230)
+STORAGE_ZONE = (869, 483, 267, 249)
+CHECK_IN_ZONE = (595, 323, 263, 221)
+CHECK_OUT_ZONE = (1133, 311, 268, 216)
 
 # =============================================================================
 # Language & Object Definitions
@@ -35,7 +35,7 @@ COLOR_RANGES = {
     "black":  [((0, 0, 0), (180, 255, 65))],
     "white":  [((0, 0, 160), (180, 60, 255))],
     "gray":   [((0, 0, 66), (180, 65, 159))],
-    "red":    [((0, 66, 50), (10, 255, 255)), ((160, 66, 50), (180, 255, 255))], 
+    "red":    [((0, 100, 40), (5, 255, 255)), ((170, 100, 40), (180, 255, 255))], 
     "yellow": [((15, 66, 50), (45, 255, 255))],
     "blue":   [((95, 66, 50), (130, 255, 255))],
     "green":  [((46, 66, 50), (94, 255, 255))],
@@ -49,6 +49,10 @@ COLOR_RANGES = {
 
 # Minimum pixel area for a detected blob to be considered a real object
 MIN_BLOB_AREA_PX = 100
+
+# Minimum color pixel count in front camera to confirm object exists before starting
+# You can tune this based on the printed output from the Pre-Check step
+FRONT_MIN_PRESENCE_PX = 500  
 
 # =============================================================================
 # Wrist Camera Grasp Verification Constants

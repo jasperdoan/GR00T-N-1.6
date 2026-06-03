@@ -4,12 +4,12 @@ SO100 Motion Primitives
 Smooth trajectory execution between joint-space waypoints.
 
 Public API:
-  lerp_to_waypoint()     — smoothly interpolate from current pose to a target.
-  spline_trajectory()    — smooth Catmull-Rom path through multiple waypoints
-                           with continuous velocity at every intermediate point.
-  move_to_home()         — convenience wrapper back to HOME_ACTION.
-  move_to_ready()        — task-specific approach position, defined in constants.
-  scripted_transport()   — full pick-to-place sequence using spline_trajectory.
+  lerp_to_waypoint()      — smoothly interpolate from current pose to a target.
+  spline_trajectory()     — smooth Catmull-Rom path through multiple waypoints.
+  move_to_home()          — convenience wrapper back to HOME_ACTION.
+  move_to_ready()         — task-specific approach position, defined in constants.
+  scripted_transport()    — full pick-to-place sequence using spline_trajectory.
+  execute_failure_shake() — visual head shake for failure indications.
 """
 
 import time
@@ -38,8 +38,6 @@ from constants import (
 # Target control frequency (Hz)
 CONTROL_HZ = 30
 
-# Global drop counter to organize objects in a grid
-_drop_counter = 0
 
 # =============================================================================
 # Exceptions
@@ -131,7 +129,6 @@ def _catmull_rom(p0: float, p1: float, p2: float, p3: float, t: float) -> float:
         + ( 2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t ** 2
         + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t ** 3
     )
-
 
 def arc_trajectory(
     robot,
@@ -237,6 +234,37 @@ def move_to_ready(
         fixed_joints={"gripper.pos": GRIPPER_OPEN_POS},
     )
 
+def execute_failure_shake(robot) -> None:
+    """
+    Shakes the robot's 'head' (pan and wrist roll) to indicate failure/absence of an object.
+    Requires the robot to be starting roughly near HOME_ACTION for visual effect.
+    """
+    print("  [Motion] Executing failure 'shake' motion...")
+    obs = robot.get_observation()
+    base_pose = {j: float(obs.get(j, HOME_ACTION.get(j, 0.0))) for j in JOINT_NAMES}
+    
+    shake_poses = []
+    
+    # Shake right
+    pose1 = base_pose.copy()
+    pose1["shoulder_pan.pos"] = -20.0
+    pose1["wrist_roll.pos"] = -20.0
+    shake_poses.append(pose1)
+    
+    # Shake left
+    pose2 = base_pose.copy()
+    pose2["shoulder_pan.pos"] = 20.0
+    pose2["wrist_roll.pos"] = 20.0
+    shake_poses.append(pose2)
+
+    # Return to base
+    shake_poses.append(base_pose)
+
+    # Do it thrice
+    for _ in range(3): 
+        for pose in shake_poses:
+            lerp_to_waypoint(robot, pose, 0.3)
+
 
 # =============================================================================
 # Scripted Transport Sequence
@@ -252,7 +280,8 @@ def scripted_transport(
     Execute the deterministic pick-to-place trajectory using fluid Bezier arcs.
     Now actively monitored by monitor_callback to detect mid-air object drops.
     """
-    global _drop_counter
+    if not hasattr(scripted_transport, "drop_counter"):
+        scripted_transport.drop_counter = 0
     
     base_waypoint = (
         STORAGE_PLACE.copy() if task_type == "check_in" else CHECKOUT_PLACE.copy()
@@ -267,12 +296,12 @@ def scripted_transport(
         {"shoulder_pan.pos": 0.0,  "wrist_flex.pos": 5.0},    # Further forward
     ]
     
-    offset = grid_offsets[_drop_counter % len(grid_offsets)]
+    offset = grid_offsets[scripted_transport.drop_counter % len(grid_offsets)]
     place_waypoint = base_waypoint.copy()
     place_waypoint["shoulder_pan.pos"] += offset["shoulder_pan.pos"]
     place_waypoint["wrist_flex.pos"] += offset["wrist_flex.pos"]
     
-    _drop_counter += 1 # Increment for the next run!
+    scripted_transport.drop_counter += 1 # Increment for the next run!
 
     rng = np.random.default_rng()
     for joint in ("shoulder_lift.pos", "elbow_flex.pos", "wrist_flex.pos"):
