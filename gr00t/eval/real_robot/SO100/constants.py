@@ -52,7 +52,7 @@ MIN_BLOB_AREA_PX = 100
 
 # Minimum color pixel count in front camera to confirm object exists before starting
 # You can tune this based on the printed output from the Pre-Check step
-FRONT_MIN_PRESENCE_PX = 500  
+FRONT_MIN_PRESENCE_PX = 2000  
 
 # =============================================================================
 # Wrist Camera Grasp Verification Constants
