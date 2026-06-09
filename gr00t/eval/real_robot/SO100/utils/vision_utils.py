@@ -23,7 +23,8 @@ from utils.constants import (
     WRIST_STABILITY_THR,
     WRIST_CONFIRM_FRAMES,
     VLA_GRASP_MIN_TIME,
-    GRIPPER_OPEN_POS
+    GRIPPER_OPEN_POS,
+    GRIPPER_TRANSPORT_THRESHOLD
 )
 
 # =============================================================================
