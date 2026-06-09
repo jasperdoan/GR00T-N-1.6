@@ -308,8 +308,8 @@ def scripted_transport(
         place_waypoint[joint] += rng.uniform(-PLACE_VARIATION_DEG, PLACE_VARIATION_DEG)
 
     raw_grip       = float(grasp_obs.get("gripper.pos", GRIPPER_GRASP_POS))
-    gripper_closed = max(raw_grip, GRIPPER_TRANSPORT_MIN)   # inverted: high = closed, so max clamps against opening
-    transport_lock = {"gripper.pos": gripper_closed}
+    gripper_locked = min(raw_grip, GRIPPER_TRANSPORT_THRESHOLD) 
+    transport_lock = {"gripper.pos": gripper_locked}
 
     # ── Phase A: Sweeping Arc (Lift to Place) ──
     print("  [Transport] Phase A — Sweeping Arc to placement zone …")

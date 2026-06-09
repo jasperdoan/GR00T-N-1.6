@@ -264,7 +264,7 @@ class GraspDetector:
 
         # --- Signal C: Gripper STRICT Check ---
         gripper_pos = obs.get("gripper.pos", GRIPPER_OPEN_POS)
-        is_gripping = float(gripper_pos) >= GRIPPER_TRANSPORT_MIN  
+        is_gripping = float(gripper_pos) <= GRIPPER_TRANSPORT_THRESHOLD  
 
         # --- Decision Logic ---
         if is_gripping and not has_correct_color:
@@ -317,7 +317,7 @@ class GraspDetector:
 
         # --- Signal B: Mechanical Gripper Check ---
         gripper_pos = float(obs.get("gripper.pos", GRIPPER_OPEN_POS))
-        is_gripping = gripper_pos >= GRIPPER_TRANSPORT_MIN   
+        is_gripping = gripper_pos <= GRIPPER_TRANSPORT_THRESHOLD
 
         # --- Signal C: Color Blob Integrity ---
         safe_curr = _ensure_uint8(wrist_img)

@@ -89,20 +89,19 @@ HOME_ACTION = {
     "elbow_flex.pos":     60.0,
     "wrist_flex.pos":     60.0,
     "wrist_roll.pos":     0.0,
-    "gripper.pos":         2.0,   # open (inverted design)
+    "gripper.pos":        95.0,   # open (inverted design)
 }
 
 # =============================================================================
 # Gripper State Thresholds
 # =============================================================================
 
-GRIPPER_OPEN_POS    = 2.0    # degrees — fully open  (inverted design: low angle = open)
-GRIPPER_GRASP_POS   = 75.0   # degrees — good grasp on cube
+GRIPPER_OPEN_POS    = 95.0   # UPDATED: degrees — fully open
+GRIPPER_GRASP_POS   = 25.0   # UPDATED: degrees — good grasp on cube
+GRIPPER_FULLY_CLOSED= 1.0    # UPDATED: degrees — closed empty
 
 # Minimum gripper position allowed during transport.
-# Clamps the locked value so a slightly-slipped grasp (e.g. 68°) can't open further.
-# NOTE: Direction is inverted vs old design — closing is now HIGH angle, opening is LOW angle.
-GRIPPER_TRANSPORT_MIN = GRIPPER_GRASP_POS - 5.0   # 70.0°
+GRIPPER_TRANSPORT_THRESHOLD = GRIPPER_GRASP_POS + 5.0
 
 # =============================================================================
 # Task-Specific Ready / Approach Positions

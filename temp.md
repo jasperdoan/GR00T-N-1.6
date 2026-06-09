@@ -42,44 +42,44 @@ lerobot-record \
     "shoulder_pan": {
         "id": 1,
         "drive_mode": 0,
-        "homing_offset": -2000,
-        "range_min": 774,
-        "range_max": 3308
+        "homing_offset": -2005,
+        "range_min": 778,
+        "range_max": 3378
     },
     "shoulder_lift": {
         "id": 2,
         "drive_mode": 0,
-        "homing_offset": -1965,
-        "range_min": 946,
-        "range_max": 2954
+        "homing_offset": -2018,
+        "range_min": 1022,
+        "range_max": 3204
     },
     "elbow_flex": {
         "id": 3,
         "drive_mode": 0,
-        "homing_offset": -1882,
-        "range_min": 867,
-        "range_max": 3105
+        "homing_offset": -898,
+        "range_min": 887,
+        "range_max": 3122
     },
     "wrist_flex": {
         "id": 4,
         "drive_mode": 0,
-        "homing_offset": -1285,
-        "range_min": 942,
-        "range_max": 3017
+        "homing_offset": -1176,
+        "range_min": 822,
+        "range_max": 2894
     },
     "wrist_roll": {
         "id": 5,
         "drive_mode": 0,
-        "homing_offset": 235,
-        "range_min": 1103,
-        "range_max": 3182
+        "homing_offset": -221,
+        "range_min": 1028,
+        "range_max": 3050
     },
     "gripper": {
         "id": 6,
         "drive_mode": 0,
-        "homing_offset": 1750,
-        "range_min": 1590,
-        "range_max": 2626
+        "homing_offset": 1324,
+        "range_min": 1868,
+        "range_max": 2625
     }
 }
 
@@ -105,7 +105,7 @@ lerobot-record \
     --teleop.id=leader_arm \
     --display_data=false \
     --dataset.repo_id=so101/shapes \
-    --dataset.num_episodes=10 \
+    --dataset.num_episodes=5 \
     --dataset.single_task="yellow cube" \
     --dataset.push_to_hub=false \
     --dataset.episode_time_s=8 \
