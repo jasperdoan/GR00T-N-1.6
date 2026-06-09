@@ -38,246 +38,55 @@ lerobot-record \
 
 
 
-This document serves as a comprehensive development log for the **GR00T SO100 Autonomous Task Completion & Termination System**.
-
----
-
-# Project Report: Autonomous Task Termination for GR00T-VLA
-waypoint = {
-    "shoulder_pan.pos":   -3.271,
-    "shoulder_lift.pos":   12.028,
-    "elbow_flex.pos":  -20.273,
-    "wrist_flex.pos":   80.452,
-    "wrist_roll.pos":   45.690,
-    "gripper.pos":   24.119,
-waypoint = {
-    "shoulder_pan.pos":   -3.271,
-    "shoulder_lift.pos":   12.028,
-    "elbow_flex.pos":  -20.273,
-    "wrist_flex.pos":   80.452,
-    "wrist_roll.pos":   45.690,
-    "gripper.pos":   24.119,
-}}
-## 1. Problem Statement: The "Infinite Loop" Challenge
-**The Context:** We are running a GR00T policy (VLA model) using a TensorRT-accelerated DiT (Diffusion Transformer) head to control an SO100 robot arm.
-**The Issue:** Like most diffusion-based policies, GR00T is trained to continuously predict the next action chunk. It lacks a built-in "End of Task" signal. Once the robot finishes a task (e.g., placing a cube), the model continues to run, causing the robot to:
-1.  Jitter and drift due to stochastic noise in the model.
-2.  Attempt to "re-do" the task if the environment is reset.
-3.  Perform erratic movements that could potentially damage the hardware.
-
----
-
-## 2. Task Description & Logic
-The robot is tasked with "Sorting" colored cubes (Red, Blue, Yellow) across three designated tabletop zones.
-
-### **Instruction Parsing & Expected Behavior**
-We defined two primary task types based on language input:
-*   **"Check in [Color] cube":** Move the cube from the **Check-in Area** to the **Storage Area**.
-    *   *Success Condition:* Target color detected in `STORAGE_ZONE`.
-*   **"Check out [Color] cube":** Move the cube from the **Storage Area** to the **Check-out Area**.
-    *   *Success Condition:* Target color detected in `CHECK_OUT_ZONE`.
-
----
-
-## 3. Initial Thought Process & Potential Solutions
-To solve the infinite loop, we explored four architectural approaches:
-1.  **Human-in-the-loop:** Using keyboard interrupts (pressing 'q') to stop. (Manual, not autonomous).
-2.  **Hard Timeouts:** Stopping after exactly 20-30 seconds. (Inflexible; doesn't account for failures or fast completions).
-3.  **Action Convergence:** Monitoring joint variance to see if the robot "settles." (Unreliable due to model jitter).
-4.  **Parallel Vision (Selected):** Using a secondary, lightweight OpenCV process to "watch" the goal zones independently of the VLA model.
-
----
-
-## 4. Implementation Phase 1: Vision Calibration
-To enable autonomous stopping, we had to define what "Success" looks like to a computer. We performed a calibration to map the physical workspace to pixel coordinates and HSV color ranges.
-
-### **Workspace Coordinates (X, Y, Width, Height)**
-*   **Storage Zone:** `(277, 168, 96, 94)`
-*   **Check-in Zone:** `(399, 100, 99, 97)`
-*   **Check-out Zone:** `(152, 103, 96, 95)`
-
-waypoint = {
-    "shoulder_pan.pos":   -3.271,
-    "shoulder_lift.pos":   12.028,
-    "elbow_flex.pos":  -20.273,
-    "wrist_flex.pos":   80.452,
-    "wrist_roll.pos":   45.690,
-    "gripper.pos":   24.119,
-}### **Color Signatures (Target HSV)**
-*   **Red:** `[177, 20, 214]` (Pinkish-red)
-*   **Blue:** `[96, 169, 13]` (Blue)
-*   **Yellow:** `[33, 90, 168]` (Yellow-green)
-
----
-
-## 5. Implementation Phase 2: Solving Environmental Interference
-**The Problem:** The physical zones are marked with color-coded paper (Pink for Check-in, Yellow for Check-out). A standard color filter would see the paper and immediately think the cube was already there.
-
-**The Solution: Background Subtraction**
-We updated the system to take a **Baseline Snapshot** when the robot is at the "Home" position (before the cube is moved).
-*   **Logic:** The vision system calculates the absolute difference between the current frame and the baseline.
-*   **Effect:** Static objects (like the colored paper) are subtracted and become "black." Only new objects entering the zone (the cube or the robot arm) are processed.
-
-**The "Robot Left the Space" Logic:**
-To ensure the task is truly finished, we don't just look for color; we check if the detected blob **touches the boundaries** of the zone.
-*   If the blob touches the edge: The robot arm is likely still in the frame (holding the cube).
-*   If the blob is "floating" in the center: The arm has let go and cleared the area. **This triggers the Task Success signal.**
-
----
-
-## 6. Implementation Phase 3: Hardware Refinement (Smoothing)
-**The Problem:** Once the task was detected as "Done," the robot was commanded to go to a "Home" position. This caused a violent "snapping" motion because the joints tried to move 90+ degrees in a single frame.
-
-**The Home Position Definition:**
-```python
-HOME_ACTION = {
-    "shoulder_pan.pos": 0, "shoulder_lift.pos": -60, "elbow_flex.pos": 60,
-    "wrist_flex.pos": 60, "wrist_roll.pos": 90, "gripper.pos": 40
+{
+    "shoulder_pan": {
+        "id": 1,
+        "drive_mode": 0,
+        "homing_offset": -2005,
+        "range_min": 778,
+        "range_max": 3378
+    },
+    "shoulder_lift": {
+        "id": 2,
+        "drive_mode": 0,
+        "homing_offset": -2018,
+        "range_min": 1022,
+        "range_max": 3204
+    },
+    "elbow_flex": {
+        "id": 3,
+        "drive_mode": 0,
+        "homing_offset": -898,
+        "range_min": 887,
+        "range_max": 3122
+    },
+    "wrist_flex": {
+        "id": 4,
+        "drive_mode": 0,
+        "homing_offset": -1176,
+        "range_min": 822,
+        "range_max": 2894
+    },
+    "wrist_roll": {
+        "id": 5,
+        "drive_mode": 0,
+        "homing_offset": -221,
+        "range_min": 1028,
+        "range_max": 3050
+    },
+    "gripper": {
+        "id": 6,
+        "drive_mode": 0,
+        "homing_offset": 1324,
+        "range_min": 1868,
+        "range_max": 2625
+    }
 }
-```
-
-**The Solution: Smoothstep Interpolation**
-Instead of a sudden jump, we implemented a 2.0-second **Ease-In/Ease-Out (Smoothstep)** trajectory:
-1.  **Read:** Get current joint states via `robot.get_observation()`.
-waypoint = {
-    "shoulder_pan.pos":   -3.271,
-    "shoulder_lift.pos":   12.028,
-    "elbow_flex.pos":  -20.273,
-    "wrist_flex.pos":   80.452,
-    "wrist_roll.pos":   45.690,
-    "gripper.pos":   24.119,
-waypoint = {
-    "shoulder_pan.pos":   -3.271,
-    "shoulder_lift.pos":   12.028,
-    "elbow_flex.pos":  -20.273,
-    "wrist_flex.pos":   80.452,
-    "wrist_roll.pos":   45.690,
-    "gripper.pos":   24.119,
-}}2.  **Lerp:** Linearly interpolate from `current` to `home`.
-3.  **Smooth:** Apply a mathematical curve ($3t^2 - 2t^3$) so the motion starts and ends gently.
-
----
-
-## 7. Current System Architecture (Summary)
-1.  **Initialization:** Robot connects; user provides instruction (e.g., "Check in blue cube").
-2.  **Pre-Flight:** Robot smoothly moves to **Home**. A **Baseline Snapshot** is taken.
-3.  **Execution:** GR00T-VLA starts predicting actions.
-4.  **Monitoring (Parallel):**
-    *   Crop the front camera to the **Target Zone**.
-    *   Subtract the **Baseline**.
-    *   Mask for the **Target Color**.
-    *   Check if the resulting blob is **stable and not touching the zone edges**.
-5.  **Termination:** Once Success is detected, the inference loop breaks.
-6.  **Cleanup:** Robot performs a final **Smooth Home** and the script exits cleanly.
-
-**Result:** A fully autonomous robot that understands its task, performs it, and stops precisely when the goal is achieved without human intervention or hardware stress. The current architecture—combining Time-Aligned Temporal Ensembling for VLA action chunking with a Hybrid Scripted/VLA approach and Parallel Vision—is genuinely at the cutting edge of open-source robotics. We've already solved the "stop-and-go" chunking problem that plagues 90% of VLA implementations.
 
 
 
 
-
-
----
-
-
-
-
-
-lerobot-record \
-    --robot.type=so101_follower \
-    --robot.port=/dev/ttyACM0 \
-    --robot.id=follower_arm \
-    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30, fourcc: "MJPG"}, wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30, fourcc: "MJPG"}}" \
-    --teleop.type=so101_leader \
-    --teleop.port=/dev/ttyACM1 \
-    --teleop.id=leader_arm \
-    --display_data=true \
-    --dataset.repo_id=so101/shapes \
-    --dataset.num_episodes=10 \
-    --dataset.single_task="yellow cube" \
-    --dataset.push_to_hub=false \
-    --dataset.episode_time_s=6 \
-    --dataset.reset_time_s=20 \
-    --resume=true
-
-
-
-
-
-red cube    60  x
-orange cube 20  x
-yellow cube 60  
-pink cube   20
-blue cube   20
-green prism 60
-red ball    60
-yellow ball 20
-
-Total = 60 + 20 + 60 + 20 + 60 + 60 + 60 + 20 = 320 episodes
-
---- 
-
-60 episodes per object
-
-The "Vanilla" Reaches (20 Episodes) - Teach the basic kinematics of reaching the object in plain sight.
-
-    Setup: Only the target object in the workspace. Completely empty otherwise.
-
-    Locations: Randomly scatter it across the CHECK_IN_ZONE and CHECK_OUT_ZONE. Do not favor the dead center. Place it in the top-left, bottom-right, dead middle, etc.
-
-    Rotations: Keep the object relatively "square" to the robot for these.
-
-
-Pose & Rotation Robustness (20 Episodes) - Teach the model that a cube at a 45-degree angle is still a cube, and how to angle the wrist roll to grasp it.
-
-    Setup: Single object, but actively mess with its rotation.
-
-    Execution:
-
-        For Cubes: Rotate them 30°, 45°, 60°. Your SO-100 wrist will need to roll to match the faces so the gripper fingers fit cleanly.
-
-        For the Green Prism: Lay it sideways, point it straight at the camera, point it diagonally.
-
-
-The "Shape vs. Color" Distractor Test (20 Episodes) - Force the language embedding to pay attention to both the color adjective AND the shape noun.
-
-    Setup: Place the target object alongside 1 or 2 distractors.
-
-    Combinations to record:
-
-        Same Color, Different Shape: Target = "red cube". Distractor = "red sphere". (Forces the model to learn "cube" vs "sphere").
-
-        Same Shape, Different Color: Target = "red cube". Distractor = "blue cube" or "pink cube". (Forces the model to look at the color).
-
-        Spacing: Sometimes put the distractor 10 inches away. Sometimes put it literally 1 inch away so the gripper has to squeeze past it.
-
-
----
-
-For similar shapes variant
-
-The 20-Episode "Variant" Breakdown
-
-    5 Episodes - Vanilla/Basic Locations:
-
-        Setup: Just the Blue Cube by itself. Scatter it in a few different spots.
-
-        Purpose: Just to prove to the model that the Blue Cube can exist on its own in the workspace.
-
-    5 Episodes - Rotated:
-
-        Setup: Just the Blue Cube, but angled (30°, 45°).
-
-        Purpose: Confirms that the color features and the rotation features aren't mutually exclusive.
-
-    10 Episodes - The "Anti-Bias" Distractor Test (Crucial):
-
-        Setup: Put the Blue Cube AND the Red Cube in the scene together.
-
-        Prompt: "blue cube"
-
-        Purpose: This is the most important part of the 20 episodes. Because the model will have seen 60 Red Cubes, its first instinct when it hears "cube" will be to grab the red one. By forcing it to reach past the Red Cube to grab the Blue one 10 times, you ruthlessly train the color bias out of the model.
-
+----
 
 
 
@@ -296,7 +105,7 @@ lerobot-record \
     --teleop.id=leader_arm \
     --display_data=false \
     --dataset.repo_id=so101/shapes \
-    --dataset.num_episodes=10 \
+    --dataset.num_episodes=5 \
     --dataset.single_task="yellow cube" \
     --dataset.push_to_hub=false \
     --dataset.episode_time_s=8 \

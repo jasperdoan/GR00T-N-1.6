@@ -6,9 +6,9 @@ SO100 Constants: Workspace zones, color ranges, home position, and scripted wayp
 # Workspace Zone Definitions (x, y, width, height) in front-camera pixels
 # =============================================================================
 
-STORAGE_ZONE   = (870, 519, 263, 234)
-CHECK_IN_ZONE  = (591, 359, 267, 217)
-CHECK_OUT_ZONE = (1137, 344, 257, 230)
+STORAGE_ZONE = (869, 483, 267, 249)
+CHECK_IN_ZONE = (595, 323, 263, 221)
+CHECK_OUT_ZONE = (1133, 311, 268, 216)
 
 # =============================================================================
 # Language & Object Definitions
@@ -27,18 +27,37 @@ KNOWN_OBJECTS = [
 ]
 
 # =============================================================================
+# HSV Color Ranges for Vision Tracking (Hue, Saturation, Value)
+# Ranges are (Lower Bound), (Upper Bound). Red needs two ranges because it wraps around 180.
+# =============================================================================
+
+COLOR_RANGES = {
+    "black":  [((0, 0, 0), (180, 255, 65))],
+    "white":  [((0, 0, 160), (180, 60, 255))],
+    "gray":   [((0, 0, 66), (180, 65, 159))],
+    "red":    [((0, 100, 40), (5, 255, 255)), ((170, 100, 40), (180, 255, 255))], 
+    "yellow": [((15, 66, 50), (45, 255, 255))],
+    "blue":   [((95, 66, 50), (130, 255, 255))],
+    "green":  [((46, 66, 50), (94, 255, 255))],
+    "purple": [((131, 66, 50), (160, 255, 255))],
+    "orange": [((10, 66, 50), (20, 255, 255))], 
+}
+
+# =============================================================================
 # Front Camera Task Success Verification Constants
 # =============================================================================
 
 # Minimum pixel area for a detected blob to be considered a real object
 MIN_BLOB_AREA_PX = 100
 
+# Minimum color pixel count in front camera to confirm object exists before starting
+# You can tune this based on the printed output from the Pre-Check step
+FRONT_MIN_PRESENCE_PX = 2000  
+
 # =============================================================================
 # Wrist Camera Grasp Verification Constants
 # =============================================================================
-
-# Bounding box between gripper fingers from calibration
-WRIST_GRASP_ROI = (276, 293, 193, 186)
+WRIST_GRASP_ROI = (164, 362, 346, 117)
 # WRIST_GRASP_ROI = (133, 311, 413, 166)
 
 WRIST_PRESENCE_THR   = 50     # Pixel difference intensity to count as "changed" from baseline
@@ -70,20 +89,19 @@ HOME_ACTION = {
     "elbow_flex.pos":     60.0,
     "wrist_flex.pos":     60.0,
     "wrist_roll.pos":     0.0,
-    "gripper.pos":         2.0,   # open (inverted design)
+    "gripper.pos":        95.0,   # open (inverted design)
 }
 
 # =============================================================================
 # Gripper State Thresholds
 # =============================================================================
 
-GRIPPER_OPEN_POS    = 2.0    # degrees — fully open  (inverted design: low angle = open)
-GRIPPER_GRASP_POS   = 75.0   # degrees — good grasp on cube
+GRIPPER_OPEN_POS    = 95.0   # UPDATED: degrees — fully open
+GRIPPER_GRASP_POS   = 25.0   # UPDATED: degrees — good grasp on cube
+GRIPPER_FULLY_CLOSED= 1.0    # UPDATED: degrees — closed empty
 
 # Minimum gripper position allowed during transport.
-# Clamps the locked value so a slightly-slipped grasp (e.g. 68°) can't open further.
-# NOTE: Direction is inverted vs old design — closing is now HIGH angle, opening is LOW angle.
-GRIPPER_TRANSPORT_MIN = GRIPPER_GRASP_POS - 5.0   # 70.0°
+GRIPPER_TRANSPORT_THRESHOLD = GRIPPER_GRASP_POS + 5.0
 
 # =============================================================================
 # Task-Specific Ready / Approach Positions
@@ -94,16 +112,22 @@ GRIPPER_TRANSPORT_MIN = GRIPPER_GRASP_POS - 5.0   # 70.0°
 
 READY_POSITIONS = {
     "check_in": {
-        "shoulder_pan.pos":   36.2,
-        "shoulder_lift.pos": -21.1,
-        "elbow_flex.pos":     27.1,
-        "wrist_flex.pos":     78.4,
+        "shoulder_pan.pos":   45.0,
+        "shoulder_lift.pos": -65.0,
+        "elbow_flex.pos":     60.0,
+        "wrist_flex.pos":     72.0,
     },
     "check_out": {
         "shoulder_pan.pos":    0.0,
-        "shoulder_lift.pos": -21.1,
-        "elbow_flex.pos":     27.1,
-        "wrist_flex.pos":     78.4,
+        "shoulder_lift.pos": -60.0,
+        "elbow_flex.pos":     60.0,
+        "wrist_flex.pos":     45.0,
+    },
+    "check_back": {
+        "shoulder_pan.pos":  -45.0,
+        "shoulder_lift.pos": -65.0,
+        "elbow_flex.pos":     60.0,
+        "wrist_flex.pos":     72.0,
     },
 }
 
@@ -117,20 +141,28 @@ LIFT_OVERRIDE = {
     "wrist_flex.pos":    70.1,
 }
 
+CHECKIN_PLACE = {
+    "shoulder_pan.pos":  45.0,
+    "shoulder_lift.pos": 19.5,
+    "elbow_flex.pos":   -2.1,
+    "wrist_flex.pos":    72.6,
+    "wrist_roll.pos":    33.8,
+}
+
 STORAGE_PLACE = {
     "shoulder_pan.pos":   0.0,
     "shoulder_lift.pos": 19.5,
-    "elbow_flex.pos":   -12.1,
+    "elbow_flex.pos":   -2.1,
     "wrist_flex.pos":    72.6,
-    "wrist_roll.pos":    63.8,
+    "wrist_roll.pos":    33.8,
 }
 
 CHECKOUT_PLACE = {
     "shoulder_pan.pos":  -50.2,
     "shoulder_lift.pos": 19.5,
-    "elbow_flex.pos":   -12.1,
+    "elbow_flex.pos":   -2.1,
     "wrist_flex.pos":    72.6,
-    "wrist_roll.pos":    63.8,
+    "wrist_roll.pos":    33.8,
 }
 
 PLACE_VARIATION_DEG = 2.0   # uniform random in [-X, +X] degrees per joint
