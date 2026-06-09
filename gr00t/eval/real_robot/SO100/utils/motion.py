@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 
 from utils.constants import (
+    CHECKIN_PLACE,
     CHECKOUT_PLACE,
     GRIPPER_GRASP_POS,
     GRIPPER_OPEN_POS,
@@ -283,9 +284,14 @@ def scripted_transport(
     if not hasattr(scripted_transport, "drop_counter"):
         scripted_transport.drop_counter = 0
     
-    base_waypoint = (
-        STORAGE_PLACE.copy() if task_type == "check_in" else CHECKOUT_PLACE.copy()
-    )
+    if task_type == "check_in":
+        base_waypoint = STORAGE_PLACE.copy()
+    elif task_type == "check_out":
+        base_waypoint = CHECKOUT_PLACE.copy()
+    elif task_type == "check_back":
+        base_waypoint = CHECKIN_PLACE.copy()
+    else:
+        base_waypoint = STORAGE_PLACE.copy()
 
     # ── Calculate Grid Offset ──
     # Create a 2x2 grid of drop points to prevent stacking collisions

@@ -123,6 +123,12 @@ READY_POSITIONS = {
         "elbow_flex.pos":     60.0,
         "wrist_flex.pos":     45.0,
     },
+    "check_back": {
+        "shoulder_pan.pos":  -45.0,
+        "shoulder_lift.pos": -65.0,
+        "elbow_flex.pos":     60.0,
+        "wrist_flex.pos":     72.0,
+    },
 }
 
 # =============================================================================
@@ -133,6 +139,14 @@ LIFT_OVERRIDE = {
     "shoulder_lift.pos": -33.3,
     "elbow_flex.pos":    23.4,
     "wrist_flex.pos":    70.1,
+}
+
+CHECKIN_PLACE = {
+    "shoulder_pan.pos":  45.0,
+    "shoulder_lift.pos": 19.5,
+    "elbow_flex.pos":   -2.1,
+    "wrist_flex.pos":    72.6,
+    "wrist_roll.pos":    33.8,
 }
 
 STORAGE_PLACE = {

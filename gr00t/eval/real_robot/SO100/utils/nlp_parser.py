@@ -10,7 +10,8 @@ from utils.constants import KNOWN_OBJECTS, CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAG
 
 TASK_SYNONYMS = {
     "check_out": ["out", "retrieve", "get", "fetch", "checkout"],
-    "check_in": ["in", "store", "put", "place", "checkin", "return"]
+    "check_in": ["in", "store", "put", "place", "checkin"],
+    "check_back": ["back", "return", "checkback"]
 }
 
 def parse_instruction(instruction: str) -> Tuple[str, str, Tuple[int, int, int, int], Tuple[int, int, int, int]]:
@@ -30,6 +31,9 @@ def parse_instruction(instruction: str) -> Tuple[str, str, Tuple[int, int, int, 
             if task_type == "check_out":
                 source_zone = STORAGE_ZONE
                 target_zone = CHECK_OUT_ZONE
+            elif task_type == "check_back":
+                source_zone = CHECK_OUT_ZONE
+                target_zone = CHECK_IN_ZONE
             break
 
     # Determine target_object
