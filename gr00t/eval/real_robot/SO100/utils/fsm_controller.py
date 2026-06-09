@@ -69,7 +69,7 @@ class EvaluationFSM:
         obs = self.robot.get_observation()
         
         # Check if color exists inside the SOURCE zone
-        is_present, px_count = check_color_presence_front(obs["front"], self.target_object, zone=self.source_zone, debug=True)
+        is_present, px_count = check_color_presence_front(obs["front"], self.target_object, zone=self.source_zone)
         
         if not is_present:
             print(f"\n❌ [PRE_CHECK FAILED] Expected color for '{self.target_object}' not found in the starting zone.")
