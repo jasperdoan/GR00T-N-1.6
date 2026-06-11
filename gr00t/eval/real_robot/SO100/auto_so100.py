@@ -8,6 +8,9 @@ where the red cube is, and executes the corresponding next logical step.
 
 import logging
 import time
+import os
+import signal
+import sys
 from dataclasses import asdict, dataclass
 from pprint import pformat
 
@@ -58,6 +61,27 @@ def detect_next_task(front_img, target_object="red cube") -> str:
             return task_type
     return None
 
+
+graceful_stop_requested = False
+
+def request_graceful_stop(sig, frame):
+    global graceful_stop_requested
+    if graceful_stop_requested:
+        # If pressed twice, do an emergency hard kill
+        print("\n🚨 [HARD STOP] Forced exit requested! Terminating immediately.")
+        sys.exit(1)
+    
+    # First press just sets the flag
+    print("\n⏳ [SOFT STOP] Stop signal received. Finishing current task then shutting down...")
+    print("   (Press Ctrl+C again to force quit immediately)")
+    graceful_stop_requested = True
+
+# Overwrite default Ctrl+C (SIGINT) and standard kill (SIGTERM)
+signal.signal(signal.SIGINT, request_graceful_stop)
+signal.signal(signal.SIGTERM, request_graceful_stop)
+
+
+
 @draccus.wrap()
 def auto_eval(cfg: EvalConfig):
     init_logging()
@@ -71,7 +95,10 @@ def auto_eval(cfg: EvalConfig):
 
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
-    
+
+    if os.path.exists("/tmp/stop_so100.flag"):
+        os.remove("/tmp/stop_so100.flag")
+
     try:
         policy_client = PolicyClient(host=cfg.policy_host, port=cfg.policy_port)
         adapter       = So100Adapter(policy_client)
@@ -85,6 +112,13 @@ def auto_eval(cfg: EvalConfig):
 
         # ── CONTINUOUS DEMO LOOP ─────────────────────────────────────────────
         while True:
+            # 0. CHECK FOR STOP FLAG *BEFORE* STARTING A NEW TASK
+            if graceful_stop_requested or os.path.exists("/tmp/stop_so100.flag"):
+                print("\n🛑 [SHUTDOWN] Stop command detected. Exiting auto loop gracefully.")
+                if os.path.exists("/tmp/stop_so100.flag"):
+                    os.remove("/tmp/stop_so100.flag") # Clean up
+                break # Breaking the loop goes straight to the 'finally' cleanup block!
+
             # 1. Reset to home and let the cameras settle
             move_to_home(robot)
             time.sleep(1.0)   
