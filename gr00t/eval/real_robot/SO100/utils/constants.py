@@ -119,8 +119,8 @@ READY_POSITIONS = {
     },
     "check_out": {
         "shoulder_pan.pos":    0.0,
-        "shoulder_lift.pos":  -3.0,
-        "elbow_flex.pos":      5.0,
+        "shoulder_lift.pos": -12.0,
+        "elbow_flex.pos":     15.0,
         "wrist_flex.pos":     65.0,
     },
     "check_back": {
@@ -165,7 +165,7 @@ CHECKOUT_PLACE = {
     "wrist_roll.pos":     0.0,
 }
 
-PLACE_VARIATION_DEG = 2.0   # uniform random in [-X, +X] degrees per joint
+PLACE_VARIATION_DEG = 1.0   # uniform random in [-X, +X] degrees per joint
 POST_DROP_PAUSE     = 0.35  # pause after dropping cube (seconds) — increased for cleaner settle
 
 LERP_DURATION_LIFT  = 0.75

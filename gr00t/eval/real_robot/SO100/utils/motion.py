@@ -294,12 +294,12 @@ def scripted_transport(
         base_waypoint = STORAGE_PLACE.copy()
 
     # ── Calculate Grid Offset ──
-    # Create a 2x2 grid of drop points to prevent stacking collisions
     grid_offsets = [
         {"shoulder_pan.pos": 0.0,  "wrist_flex.pos": 0.0},    # Center
-        {"shoulder_pan.pos": 5.0,  "wrist_flex.pos": 0.0},    # Right
-        {"shoulder_pan.pos": -5.0, "wrist_flex.pos": 0.0},    # Left
-        {"shoulder_pan.pos": 0.0,  "wrist_flex.pos": 5.0},    # Further forward
+        {"shoulder_pan.pos": 2.0,  "wrist_flex.pos": 0.0},    # Right
+        {"shoulder_pan.pos": -2.0, "wrist_flex.pos": 0.0},    # Left
+        {"shoulder_pan.pos": 0.0,  "wrist_flex.pos": 2.0},    # Forward
+        {"shoulder_pan.pos": 0.0,  "wrist_flex.pos": -2.0},    # Back
     ]
     
     offset = grid_offsets[scripted_transport.drop_counter % len(grid_offsets)]
