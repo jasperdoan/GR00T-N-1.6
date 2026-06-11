@@ -35,10 +35,10 @@ python3 -m gr00t.experiment.launch_finetune \
     --output_dir ~/Desktop/models/so100_finetune \
     --save_steps 2500 \
     --save_total_limit 1 \
-    --max_steps 5000 \
+    --max_steps 7500 \
     --random_rotation_angle 5 \
     --warmup_ratio 0.1 \
-    --state_dropout_prob 0.1 \
+    --state_dropout_prob 0.2 \
     --weight_decay 1e-4 \
     --learning_rate 1e-4 \
     --global_batch_size 32 \
@@ -81,7 +81,7 @@ Exporting the model to ONNX requires significant RAM and disk space. This step i
 
 ```bash
 PYTHONPATH=. python scripts/deployment/export_onnx_n1d6.py \
-  --model_path ~/Desktop/models/so100_finetune/checkpoint-10000 \
+  --model_path ~/Desktop/models/so100_finetune/checkpoint-7500 \
   --dataset_path ~/Desktop/Isaac-GR00T/demo_data/cube \
   --embodiment_tag new_embodiment \
   --output_dir ~/Desktop/models/groot_n1d6_onnx

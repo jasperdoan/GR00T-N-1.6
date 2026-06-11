@@ -112,22 +112,22 @@ GRIPPER_TRANSPORT_THRESHOLD = GRIPPER_GRASP_POS + 5.0
 
 READY_POSITIONS = {
     "check_in": {
-        "shoulder_pan.pos":   45.0,
-        "shoulder_lift.pos": -65.0,
-        "elbow_flex.pos":     60.0,
-        "wrist_flex.pos":     72.0,
+        "shoulder_pan.pos":   50.0,
+        "shoulder_lift.pos": -23.0,
+        "elbow_flex.pos":     10.0,
+        "wrist_flex.pos":     91.0,
     },
     "check_out": {
         "shoulder_pan.pos":    0.0,
-        "shoulder_lift.pos": -60.0,
-        "elbow_flex.pos":     60.0,
-        "wrist_flex.pos":     45.0,
+        "shoulder_lift.pos":  -3.0,
+        "elbow_flex.pos":      5.0,
+        "wrist_flex.pos":     65.0,
     },
     "check_back": {
-        "shoulder_pan.pos":  -45.0,
-        "shoulder_lift.pos": -65.0,
-        "elbow_flex.pos":     60.0,
-        "wrist_flex.pos":     72.0,
+        "shoulder_pan.pos":  -50.0,
+        "shoulder_lift.pos": -23.0,
+        "elbow_flex.pos":     10.0,
+        "wrist_flex.pos":     91.0,
     },
 }
 
@@ -142,11 +142,11 @@ LIFT_OVERRIDE = {
 }
 
 CHECKIN_PLACE = {
-    "shoulder_pan.pos":  45.0,
+    "shoulder_pan.pos":  50.0,
     "shoulder_lift.pos": 19.5,
     "elbow_flex.pos":   -2.1,
     "wrist_flex.pos":    72.6,
-    "wrist_roll.pos":    33.8,
+    "wrist_roll.pos":     0.0,
 }
 
 STORAGE_PLACE = {
@@ -154,21 +154,21 @@ STORAGE_PLACE = {
     "shoulder_lift.pos": 19.5,
     "elbow_flex.pos":   -2.1,
     "wrist_flex.pos":    72.6,
-    "wrist_roll.pos":    33.8,
+    "wrist_roll.pos":     0.0,
 }
 
 CHECKOUT_PLACE = {
-    "shoulder_pan.pos":  -50.2,
+    "shoulder_pan.pos":  -50.0,
     "shoulder_lift.pos": 19.5,
     "elbow_flex.pos":   -2.1,
     "wrist_flex.pos":    72.6,
-    "wrist_roll.pos":    33.8,
+    "wrist_roll.pos":     0.0,
 }
 
 PLACE_VARIATION_DEG = 2.0   # uniform random in [-X, +X] degrees per joint
 POST_DROP_PAUSE     = 0.35  # pause after dropping cube (seconds) — increased for cleaner settle
 
-LERP_DURATION_LIFT  = 1.0
-LERP_DURATION_PLACE = 1.0
+LERP_DURATION_LIFT  = 0.75
+LERP_DURATION_PLACE = 0.75
 LERP_DURATION_DROP  = 0.4   # increased from 0.1 — prevents flinging the cube on release
-LERP_DURATION_HOME  = 2.0
+LERP_DURATION_HOME  = 1.0
