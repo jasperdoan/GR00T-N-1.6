@@ -16,7 +16,9 @@ from lerobot.robots import (  # noqa: F401
     RobotConfig,
     make_robot_from_config,
 )
+from lerobot.robots import koch_follower       # noqa: F401
 from lerobot.robots import so100_follower  # noqa: F401
+from lerobot.robots import so101_follower  # noqa: F401
 from lerobot.utils.utils import init_logging, log_say
 
 from utils.adapter        import So100Adapter
