@@ -134,3 +134,34 @@ lerobot-teleoperate \
     --teleop.id=leader_arm \
     --robot.cameras="{wrist: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
     --display_data=false
+
+
+
+
+---
+
+
+auto_so100 --> Run auto mode where in the order of check in to check out to check back. If object is in a certain zone already it will go from there not strictly in that order but instead in that loop or sequence.
+
+eval_so100 --> Single eval or any of the check in/out/back
+
+Now I kind of want 2 new additional feature
+
+Object box detection show:
+- Before starting and after finishing a task. It should try and detect the object within the front camera frame. I'm not sure how this is done or works but its similar to the one that's online where there's a bounding box drawn where the object is encompasses and there's a label on the box (?) I want that. It should be similar to debug where it saves the image of before and after so we can see the difference, with the bounding box of course. And I'm not sure if this is a good idea but I only want to detect certain object, or in certain area (i.e. around the workspace zone). The work space zone is a bit right so we might want to expand it a little bigger in all 4 direction to allow for the detection. I was thinking it only looks within those zone or something, or is the detection of object full frame ok? Because at the end of the day the image I want saved of the before and after should be the full frame. How ever it is done should be smartly and thought out process.
+
+Hand interrupt stop/resume:
+- Since this will be set up as a demo in a show room. Having a physical robot move could be dangerous if humans are near it. So I was thinking of using sort of like the same object detection thing where if it detects a hand in frame (front camera). It should just pauses the program, period. It pauses everything, the movement etc... If the bot is in transit pauses it or something like that. If the hand is no longer detected, or is out of frame. It may continue/resume where it has left off.
+
+What do you think? Is this design or feature good? Push back if my idea sucks, etc...
+
+here was my thought process
+
+Great ideas — let me give you my honest take before diving into code.
+Feature 1 (Bounding Box Snapshots): Solid idea, and totally doable with your existing HSV pipeline — no need for a heavyweight model like YOLO. I'll use zone-based detection with padding (not full frame) because full-frame detection would pick up colored objects in the background, hands, etc. The full image IS saved though, just with detection limited to the workspace area. Clean and intentional.
+
+Feature 2 (Hand Pause): Great safety idea for a showroom. A few design realities to push back on slightly:
+"Resume where it left off" during transport is doable — the lerp loop can hold position then continue
+"Resume where it left off" during SEARCHING is NOT safe — VLA chunks go stale. Better to reset the ensemble and grasp timer after a pause. The arm will just re-attempt the grasp.
+I'll use MediaPipe for hand detection (much more reliable than skin-color HSV, especially under showroom lighting). It's an optional dep with a HSV fallback.
+Detection refresh during transport: I'll sample the front camera every ~10 lerp steps (~3Hz) so the hand detector always has fresh frames even when the main loop isn't reading observations.

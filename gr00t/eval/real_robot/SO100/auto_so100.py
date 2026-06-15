@@ -19,15 +19,13 @@ import draccus
 from gr00t.policy.server_client import PolicyClient
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.robots import RobotConfig, make_robot_from_config
-from lerobot.robots import koch_follower       # noqa: F401
-from lerobot.robots import so100_follower  # noqa: F401
-from lerobot.robots import so101_follower  # noqa: F401
+from lerobot.robots import koch_follower, so100_follower, so101_follower  # noqa: F401
 from lerobot.utils.utils import init_logging, log_say
 
 from utils.adapter        import So100Adapter
 from utils.motion         import move_to_home
 from utils.policy_runner  import AsyncPolicyRunner
-from utils.vision_utils   import GraspDetector, check_color_presence_front
+from utils.vision_utils   import GraspDetector, check_color_presence_front, SafetyMonitor, save_workspace_snapshot
 from utils.fsm_controller import EvaluationFSM, FSMState
 from utils.constants      import CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE
 
@@ -37,18 +35,23 @@ class EvalConfig:
     policy_host:       str   = "localhost"
     policy_port:       int   = 5555
     action_horizon:    int   = 16
-    lang_instruction:  str   = "Show the demo" # Ignored in auto mode
+    lang_instruction:  str   = "Show the demo" 
     play_sounds:       bool  = False
     vla_timeout:       int   = 15    
     max_retries:       int   = 2     
     replan_every:      int   = 6
     ensemble_temp:     float = 0.1
 
-# Map the starting zones to the task that needs to be executed
 ZONE_TASK_MAP = {
     "check_in":   {"source": CHECK_IN_ZONE,  "target": STORAGE_ZONE},
     "check_out":  {"source": STORAGE_ZONE,   "target": CHECK_OUT_ZONE},
     "check_back": {"source": CHECK_OUT_ZONE, "target": CHECK_IN_ZONE},
+}
+
+ALL_ZONES_DICT = {
+    "Check In": CHECK_IN_ZONE,
+    "Storage": STORAGE_ZONE,
+    "Check Out": CHECK_OUT_ZONE
 }
 
 def detect_next_task(front_img, target_object="red cube") -> str:
@@ -67,20 +70,16 @@ graceful_stop_requested = False
 def request_graceful_stop(sig, frame):
     global graceful_stop_requested
     if graceful_stop_requested:
-        # If pressed twice, do an emergency hard kill
-        print("\n🚨 [HARD STOP] Forced exit requested! Terminating immediately.")
-        sys.exit(1)
-    
-    # First press just sets the flag
-    print("\n⏳ [SOFT STOP] Stop signal received. Finishing current task then shutting down...")
-    print("   (Press Ctrl+C again to force quit immediately)")
+        print("\n🚨 [HARD STOP] Forced exit requested! Terminating immediately (No Home Sequence).")
+        os._exit(1)
+    print("\n⏳ [SOFT STOP] Stop signal received. Finishing current movement then returning home...")
     graceful_stop_requested = True
 
-# Overwrite default Ctrl+C (SIGINT) and standard kill (SIGTERM)
 signal.signal(signal.SIGINT, request_graceful_stop)
 signal.signal(signal.SIGTERM, request_graceful_stop)
 
-
+def is_stop_requested():
+    return graceful_stop_requested or os.path.exists("/tmp/stop_so100.flag")
 
 @draccus.wrap()
 def auto_eval(cfg: EvalConfig):
@@ -91,7 +90,8 @@ def auto_eval(cfg: EvalConfig):
     print("🤖 SO100 AUTO DEMO MODE INITIALIZING...")
     print("=======================================================\n")
 
-    target_object = "red cube" # Hardcoded for now per your spec
+    target_object = "red cube" 
+    safety_monitor = SafetyMonitor(enabled=True)
 
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
@@ -110,25 +110,25 @@ def auto_eval(cfg: EvalConfig):
 
         log_say("Hardware and policy initialized.", cfg.play_sounds)
 
-        # ── CONTINUOUS DEMO LOOP ─────────────────────────────────────────────
-        while True:
-            # 0. CHECK FOR STOP FLAG *BEFORE* STARTING A NEW TASK
-            if graceful_stop_requested or os.path.exists("/tmp/stop_so100.flag"):
-                print("\n🛑 [SHUTDOWN] Stop command detected. Exiting auto loop gracefully.")
-                if os.path.exists("/tmp/stop_so100.flag"):
-                    os.remove("/tmp/stop_so100.flag") # Clean up
-                break # Breaking the loop goes straight to the 'finally' cleanup block!
+        run_counter = 1
 
-            # 1. Reset to home and let the cameras settle
-            move_to_home(robot)
+        while True:
+            if is_stop_requested():
+                print("\n🛑 [SHUTDOWN] Stop command detected. Exiting auto loop gracefully.")
+                if os.path.exists("/tmp/stop_so100.flag"): os.remove("/tmp/stop_so100.flag")
+                break 
+
+            move_to_home(robot, safety_monitor=safety_monitor)
             time.sleep(1.0)   
 
-            print("\n>>> Taking baseline snapshots of workspace...")
+            print(f"\n>>> [Run #{run_counter}] Taking baseline snapshots of workspace...")
             baseline_obs = robot.get_observation()
             baseline_img = baseline_obs["front"]
             baseline_wrist = baseline_obs["wrist"]
 
-            # 2. Auto-Discovery: Find the cube
+            # Only draw bounding box for the target object
+            save_workspace_snapshot(baseline_img, f"snapshot_run_{run_counter}_before.jpg", ALL_ZONES_DICT, target_object, padding=40)
+
             task_type = detect_next_task(baseline_img, target_object)
 
             if not task_type:
@@ -136,57 +136,60 @@ def auto_eval(cfg: EvalConfig):
                 time.sleep(5)
                 continue
 
-            # 3. Setup Task Variables
             source_zone = ZONE_TASK_MAP[task_type]["source"]
             target_zone = ZONE_TASK_MAP[task_type]["target"]
 
             print(f"\n[AUTO DEMO] Task Sequence Selected : {task_type.upper()}")
             print(f"[AUTO DEMO] Target Object          : {target_object}")
 
-            # 4. Initialize Vision Trackers for this specific run
             grasp_detector = GraspDetector(baseline_wrist_img=baseline_wrist)
             
             fsm = EvaluationFSM(
-                cfg=cfg,
-                robot=robot,
-                runner=runner,
-                grasp_detector=grasp_detector,
-                task_type=task_type,
-                target_object=target_object,
-                source_zone=source_zone,
-                target_zone=target_zone,
+                cfg=cfg, robot=robot, runner=runner,
+                grasp_detector=grasp_detector, safety_monitor=safety_monitor,
+                should_stop_cb=is_stop_requested,
+                task_type=task_type, target_object=target_object,
+                source_zone=source_zone, target_zone=target_zone,
                 baseline_img=baseline_img
             )
             
-            # 5. Run the FSM!
             final_state = fsm.run()
 
-            # 6. Evaluate outcome
+            move_to_home(robot, safety_monitor=safety_monitor)
+            time.sleep(1.0)
+            final_obs = robot.get_observation()
+            
+            save_workspace_snapshot(final_obs["front"], f"snapshot_run_{run_counter}_after.jpg", ALL_ZONES_DICT, target_object, padding=40)
+
             if final_state == FSMState.FAILED:
-                print("\n❌ [AUTO DEMO FAILED] FSM aborted. Returning home to rescan and recover...")
+                print("\n❌ [AUTO DEMO FAILED] FSM aborted. Rescanning...")
             elif final_state == FSMState.DONE:
-                print("\n✅ [AUTO DEMO PASSED] Task complete. Returning home to trigger the next sequence...")
-                time.sleep(1.0) # Let the object settle before the next baseline snapshot
+                print("\n✅ [AUTO DEMO PASSED] Task complete. Ready for next sequence...")
+                
+            run_counter += 1
                 
     except KeyboardInterrupt:
-        print("\n⚠️ [INTERRUPTED] User stopped the Auto Demo manually.")
-    except Exception as e:
-        print(f"\n🚨 [CRITICAL ERROR] Script crashed: {e}")
-        raise
+        pass 
     finally:
         print("\n>>> Initiating emergency cleanup...")
-        if 'runner' in locals():
-            try:
-                runner.reset()
-                print("  [Cleanup] Policy runner threads joined.")
-            except Exception as e:
-                pass
+        if 'safety_monitor' in locals():
+            safety_monitor.stop()
+
         if 'robot' in locals():
             try:
-                robot.disconnect()
-                print("  [Cleanup] Robot disconnected. Cameras released successfully.")
+                print("  [Cleanup] Ensuring arm is safely parked at HOME...")
+                move_to_home(robot, duration=1.0)
             except Exception as e:
-                pass
+                print(f"  [Cleanup] Failed to move home: {e}")
+
+        if 'runner' in locals():
+            try: runner.reset()
+            except Exception: pass
+            
+        if 'robot' in locals():
+            try: robot.disconnect()
+            except Exception: pass
+            
         print(">>> System shut down cleanly.\n")
 
 if __name__ == "__main__":
