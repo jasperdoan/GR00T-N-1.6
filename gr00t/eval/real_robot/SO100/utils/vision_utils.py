@@ -82,9 +82,8 @@ class SafetyMonitor:
         if not self.enabled: return
         
         # Only spend CPU time resizing if the background 
-        # process is actually ready for a new frame. Skips processing 80% of the time.
+        # process is ready. If it's busy, drop the frame instantly to stay smooth.
         if self.frame_queue.empty():
-            # MP uses 256x256 internally. Resizing here reduces IPC transfer time to <0.1ms.
             small_img = cv2.resize(img_rgb, (256, 256), interpolation=cv2.INTER_AREA)
             try:
                 self.frame_queue.put_nowait(small_img)
@@ -109,15 +108,13 @@ class SafetyMonitor:
         
         while True:
             try:
-                frame = queue.get() # Blocks until a frame is available
+                # LATENCY FIX: queue.get() naturally blocks without burning CPU. 
+                # The moment a frame hits the queue, it processes instantly.
+                frame = queue.get() 
                 img_u8 = _ensure_uint8(frame)
                 
                 results = hands.process(img_u8)
                 shared_flag.value = results.multi_hand_landmarks is not None
-                
-                # Prevent MediaPipe from cooking the CPU.
-                # Caps detection at ~20 FPS, leaving CPU power for robot math.
-                time.sleep(0.05) 
             except Exception:
                 pass
 

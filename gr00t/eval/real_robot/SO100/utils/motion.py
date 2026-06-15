@@ -58,17 +58,16 @@ def lerp_to_waypoint(
 
         robot.send_action(action)
 
-        # Fetch observation EXACTLY ONCE per loop to prevent
-        # camera synchronization delays from halving the control loop frequency.
+        # LATENCY FIX: Fetch observation and check every single step
         obs_now = None
         if (safety_monitor is not None and safety_monitor.enabled) or (monitor_callback is not None):
             obs_now = robot.get_observation()
 
-        if safety_monitor is not None and safety_monitor.enabled:
+        if safety_monitor is not None and safety_monitor.enabled and obs_now is not None:
             safety_monitor.update_frame(obs_now["front"])
             _pause_if_hand_detected(robot, safety_monitor, action)
 
-        if monitor_callback is not None:
+        if monitor_callback is not None and obs_now is not None:
             if not monitor_callback(obs_now):
                 raise GraspLostException("Grasp lost during linear interpolation.", obs_now)
 
@@ -105,16 +104,16 @@ def arc_trajectory(
 
         robot.send_action(action)
 
-        # CRITICAL BUG FIX: Fetch observation EXACTLY ONCE
+        # Fetch observation and check every single step
         obs_now = None
         if (safety_monitor is not None and safety_monitor.enabled) or (monitor_callback is not None):
             obs_now = robot.get_observation()
 
-        if safety_monitor is not None and safety_monitor.enabled:
+        if safety_monitor is not None and safety_monitor.enabled and obs_now is not None:
             safety_monitor.update_frame(obs_now["front"])
             _pause_if_hand_detected(robot, safety_monitor, action)
 
-        if monitor_callback is not None:
+        if monitor_callback is not None and obs_now is not None:
             if not monitor_callback(obs_now):
                 raise GraspLostException("Grasp lost during arc trajectory.", obs_now)
 
