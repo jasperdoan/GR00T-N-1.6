@@ -1,17 +1,3 @@
-"""
-SO100 Motion Primitives
-
-Smooth trajectory execution between joint-space waypoints.
-
-Public API:
-  lerp_to_waypoint()      — smoothly interpolate from current pose to a target.
-  spline_trajectory()     — smooth Catmull-Rom path through multiple waypoints.
-  move_to_home()          — convenience wrapper back to HOME_ACTION.
-  move_to_ready()         — task-specific approach position, defined in constants.
-  scripted_transport()    — full pick-to-place sequence using spline_trajectory.
-  execute_failure_shake() — visual head shake for failure indications.
-"""
-
 import time
 from typing import Any, Callable, Dict, List, Optional
 import numpy as np
@@ -56,26 +42,7 @@ def lerp_to_waypoint(
     monitor_callback: Optional[Callable[[Dict[str, Any]], bool]] = None,
     safety_monitor = None
 ) -> None:
-    """
-    Smoothly interpolate from the robot's current joint positions to *target*
-    using a Quintic Smoothstep curve.
-
-    Classic Smoothstep  (t² (3 − 2t))  zeroes velocity at endpoints but leaves
-    acceleration non-zero, creating a subtle snap at the start and finish.
-    Quintic Smoothstep  (6t⁵ − 15t⁴ + 10t³)  also zeroes *acceleration* at
-    both endpoints, yielding a perceptibly more natural, mechanical-wear-friendly
-    motion profile.
-
-    Args:
-        robot:            LeRobot Robot instance (get_observation / send_action).
-        target:           Mapping of joint_name → target angle (degrees).
-                          Joints absent from *target* are held at their current value.
-        duration:         Total duration of the move in seconds.
-        fixed_joints:     Optional overrides applied at every step regardless of
-                          interpolation (e.g. keep gripper closed during transport).
-        monitor_callback: Function evaluated every step. If it returns False, execution aborts.
-    """
-    obs   = robot.get_observation()
+    obs = robot.get_observation()
     start = {j: float(obs.get(j, HOME_ACTION.get(j, 0.0))) for j in JOINT_NAMES}
     end = {**start, **target}
     steps = max(2, int(duration * CONTROL_HZ))
@@ -89,16 +56,19 @@ def lerp_to_waypoint(
         action = {j: start[j] + (end[j] - start[j]) * alpha for j in JOINT_NAMES}
         if fixed_joints: action.update(fixed_joints)
 
-        # Periodically pass frames to safety monitor so we don't spam get_observation()
-        if step % 5 == 0 and safety_monitor is not None:
+        robot.send_action(action)
+
+        # Fetch observation EXACTLY ONCE per loop to prevent
+        # camera synchronization delays from halving the control loop frequency.
+        obs_now = None
+        if (safety_monitor is not None and safety_monitor.enabled) or (monitor_callback is not None):
             obs_now = robot.get_observation()
+
+        if safety_monitor is not None and safety_monitor.enabled:
             safety_monitor.update_frame(obs_now["front"])
             _pause_if_hand_detected(robot, safety_monitor, action)
 
-        robot.send_action(action)
-
         if monitor_callback is not None:
-            obs_now = robot.get_observation()
             if not monitor_callback(obs_now):
                 raise GraspLostException("Grasp lost during linear interpolation.", obs_now)
 
@@ -115,11 +85,6 @@ def arc_trajectory(
     monitor_callback: Optional[Callable[[Dict[str, Any]], bool]] = None,
     safety_monitor = None
 ) -> None:
-    """
-    Executes a smooth Quadratic Bezier curve.
-    Instead of rigidly stopping at waypoints, this sweeps smoothly from the
-    current pose, pulls gracefully toward p_mid, and lands exactly at p_end.
-    """
     obs = robot.get_observation()
     p0 = {j: float(obs.get(j, HOME_ACTION.get(j, 0.0))) for j in JOINT_NAMES}
     p1 = {**p0, **p_mid}
@@ -138,15 +103,18 @@ def arc_trajectory(
 
         if fixed_joints: action.update(fixed_joints)
 
-        if step % 5 == 0 and safety_monitor is not None:
+        robot.send_action(action)
+
+        # CRITICAL BUG FIX: Fetch observation EXACTLY ONCE
+        obs_now = None
+        if (safety_monitor is not None and safety_monitor.enabled) or (monitor_callback is not None):
             obs_now = robot.get_observation()
+
+        if safety_monitor is not None and safety_monitor.enabled:
             safety_monitor.update_frame(obs_now["front"])
             _pause_if_hand_detected(robot, safety_monitor, action)
 
-        robot.send_action(action)
-
         if monitor_callback is not None:
-            obs_now = robot.get_observation()
             if not monitor_callback(obs_now):
                 raise GraspLostException("Grasp lost during arc trajectory.", obs_now)
 
@@ -162,23 +130,6 @@ def move_to_ready(
     robot, task_type: str, duration: float = LERP_DURATION_LIFT,
     pan_override: Optional[float] = None, safety_monitor=None
 ) -> None:
-    """
-    Move to the task-specific approach / ready position.
-
-    Target joints are looked up from constants.READY_POSITIONS[task_type].
-    If pan_override is provided, the robot will adopt the safe ready elevation
-    (lift/elbow/wrist) but hold the requested shoulder pan to look down at a custom area.
-    The gripper is always forced open (GRIPPER_OPEN_POS) throughout the move.
-
-    Args:
-        robot:        LeRobot Robot instance.
-        task_type:    Task identifier string, e.g. "check_in" or "check_out".
-        duration:     Move duration in seconds.
-        pan_override: Optional custom shoulder pan to use instead of the default.
-
-    Raises:
-        ValueError if task_type is not present in READY_POSITIONS.
-    """
     base_target = READY_POSITIONS.get(task_type)
     target = base_target.copy()
     if pan_override is not None: target["shoulder_pan.pos"] = pan_override
@@ -186,11 +137,6 @@ def move_to_ready(
     lerp_to_waypoint(robot, target, duration, fixed_joints={"gripper.pos": GRIPPER_OPEN_POS}, safety_monitor=safety_monitor)
 
 def execute_failure_shake(robot) -> None:
-    """
-    Shakes the robot's 'head' (pan and wrist roll) to indicate failure/absence of an object.
-    Requires the robot to be starting roughly near HOME_ACTION for visual effect.
-    """
-    print("  [Motion] Executing failure 'shake' motion...")
     obs = robot.get_observation()
     base_pose = {j: float(obs.get(j, HOME_ACTION.get(j, 0.0))) for j in JOINT_NAMES}
     shake_poses = []
@@ -209,12 +155,7 @@ def scripted_transport(
     monitor_callback: Optional[Callable[[Dict[str, Any]], bool]] = None,
     safety_monitor=None
 ) -> None:
-    """
-    Execute the deterministic pick-to-place trajectory using fluid Bezier arcs.
-    Now actively monitored by monitor_callback to detect mid-air object drops.
-    """
-    if not hasattr(scripted_transport, "drop_counter"):
-        scripted_transport.drop_counter = 0
+    if not hasattr(scripted_transport, "drop_counter"): scripted_transport.drop_counter = 0
     
     base_waypoint = STORAGE_PLACE.copy()
     if task_type == "check_out": base_waypoint = CHECKOUT_PLACE.copy()
