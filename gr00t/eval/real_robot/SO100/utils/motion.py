@@ -14,46 +14,39 @@ Public API:
 
 import time
 from typing import Any, Callable, Dict, List, Optional
-
 import numpy as np
 
 from utils.constants import (
-    CHECKIN_PLACE,
-    CHECKOUT_PLACE,
-    GRIPPER_GRASP_POS,
-    GRIPPER_OPEN_POS,
-    GRIPPER_TRANSPORT_THRESHOLD,
-    HOME_ACTION,
-    JOINT_NAMES,
-    LERP_DURATION_DROP,
-    LERP_DURATION_HOME,
-    LERP_DURATION_LIFT,
-    LERP_DURATION_PLACE,
-    LIFT_OVERRIDE,
-    PLACE_VARIATION_DEG,
-    POST_DROP_PAUSE,
-    READY_POSITIONS,
-    STORAGE_PLACE,
+    CHECKIN_PLACE, CHECKOUT_PLACE, GRIPPER_GRASP_POS, GRIPPER_OPEN_POS,
+    GRIPPER_TRANSPORT_THRESHOLD, HOME_ACTION, JOINT_NAMES, LERP_DURATION_DROP,
+    LERP_DURATION_HOME, LERP_DURATION_LIFT, LERP_DURATION_PLACE, LIFT_OVERRIDE,
+    PLACE_VARIATION_DEG, POST_DROP_PAUSE, READY_POSITIONS, STORAGE_PLACE,
 )
 
-# Target control frequency (Hz)
 CONTROL_HZ = 30
 
-
-# =============================================================================
-# Exceptions
-# =============================================================================
-
 class GraspLostException(Exception):
-    """Raised when an object slips from the gripper during transit."""
     def __init__(self, message: str, last_obs: Dict[str, Any]):
         super().__init__(message)
         self.last_obs = last_obs
 
-
-# =============================================================================
-# Core Lerp Engine  (Quintic Smoothstep)
-# =============================================================================
+def _pause_if_hand_detected(robot, safety_monitor, hold_action):
+    """Holds position if the monitor's flag is triggered."""
+    if safety_monitor is None or not safety_monitor.enabled: return
+    
+    if safety_monitor.is_hand_present():
+        print("\n🛑 [SAFETY] Hand detected! Pausing motion...")
+        while True:
+            robot.send_action(hold_action)
+            time.sleep(1.0 / CONTROL_HZ)
+            
+            # Keep feeding the monitor so it knows when the hand leaves
+            obs = robot.get_observation()
+            safety_monitor.update_frame(obs["front"])
+            
+            if not safety_monitor.is_hand_present():
+                print("▶️ [SAFETY] Hand removed. Resuming motion...")
+                break
 
 def lerp_to_waypoint(
     robot,
@@ -61,6 +54,7 @@ def lerp_to_waypoint(
     duration: float,
     fixed_joints: Optional[Dict[str, float]] = None,
     monitor_callback: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    safety_monitor = None
 ) -> None:
     """
     Smoothly interpolate from the robot's current joint positions to *target*
@@ -83,24 +77,26 @@ def lerp_to_waypoint(
     """
     obs   = robot.get_observation()
     start = {j: float(obs.get(j, HOME_ACTION.get(j, 0.0))) for j in JOINT_NAMES}
-    end   = {**start, **target}
-
+    end = {**start, **target}
     steps = max(2, int(duration * CONTROL_HZ))
 
     for step in range(steps):
         tic = time.time()
-
-        t     = step / (steps - 1)                        # 0.0 → 1.0
-        alpha = t * t * t * (t * (t * 6.0 - 15.0) + 10.0)  # quintic smoothstep
+        
+        t = step / (steps - 1)
+        alpha = t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 
         action = {j: start[j] + (end[j] - start[j]) * alpha for j in JOINT_NAMES}
+        if fixed_joints: action.update(fixed_joints)
 
-        if fixed_joints:
-            action.update(fixed_joints)
+        # Periodically pass frames to safety monitor so we don't spam get_observation()
+        if step % 5 == 0 and safety_monitor is not None:
+            obs_now = robot.get_observation()
+            safety_monitor.update_frame(obs_now["front"])
+            _pause_if_hand_detected(robot, safety_monitor, action)
 
         robot.send_action(action)
 
-        # Monitor Transit Health (The "Oops" factor)
         if monitor_callback is not None:
             obs_now = robot.get_observation()
             if not monitor_callback(obs_now):
@@ -108,28 +104,7 @@ def lerp_to_waypoint(
 
         elapsed = time.time() - tic
         sleep_t = 1.0 / CONTROL_HZ - elapsed
-        if sleep_t > 0:
-            time.sleep(sleep_t)
-
-
-# =============================================================================
-# Catmull-Rom Spline Trajectory
-# =============================================================================
-
-def _catmull_rom(p0: float, p1: float, p2: float, p3: float, t: float) -> float:
-    """
-    Scalar Catmull-Rom interpolation between p1 and p2 at parameter t ∈ [0, 1].
-
-    The tangent at p1 is estimated as 0.5 * (p2 − p0) and at p2 as
-    0.5 * (p3 − p1), so velocity is continuous across segment boundaries —
-    the key property that eliminates stop-start jerk at intermediate waypoints.
-    """
-    return 0.5 * (
-          2.0 * p1
-        + (-p0 + p2) * t
-        + ( 2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t ** 2
-        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t ** 3
-    )
+        if sleep_t > 0: time.sleep(sleep_t)
 
 def arc_trajectory(
     robot,
@@ -138,6 +113,7 @@ def arc_trajectory(
     duration: float,
     fixed_joints: Optional[Dict[str, float]] = None,
     monitor_callback: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    safety_monitor = None
 ) -> None:
     """
     Executes a smooth Quadratic Bezier curve.
@@ -153,25 +129,22 @@ def arc_trajectory(
     for step in range(steps):
         tic = time.time()
         
-        # Smoothstep time scaling for gentle acceleration/deceleration
         t = step / (steps - 1)
         t_smooth = t * t * (3.0 - 2.0 * t)
 
         action = {}
         for j in JOINT_NAMES:
-            # Quadratic Bezier formula
-            action[j] = (
-                ((1 - t_smooth) ** 2) * p0[j] +
-                2 * (1 - t_smooth) * t_smooth * p1[j] +
-                (t_smooth ** 2) * p2[j]
-            )
+            action[j] = (((1 - t_smooth) ** 2) * p0[j] + 2 * (1 - t_smooth) * t_smooth * p1[j] + (t_smooth ** 2) * p2[j])
 
-        if fixed_joints:
-            action.update(fixed_joints)
+        if fixed_joints: action.update(fixed_joints)
+
+        if step % 5 == 0 and safety_monitor is not None:
+            obs_now = robot.get_observation()
+            safety_monitor.update_frame(obs_now["front"])
+            _pause_if_hand_detected(robot, safety_monitor, action)
 
         robot.send_action(action)
 
-        # Monitor Transit Health
         if monitor_callback is not None:
             obs_now = robot.get_observation()
             if not monitor_callback(obs_now):
@@ -179,25 +152,15 @@ def arc_trajectory(
 
         elapsed = time.time() - tic
         sleep_t = 1.0 / CONTROL_HZ - elapsed
-        if sleep_t > 0:
-            time.sleep(sleep_t)
+        if sleep_t > 0: time.sleep(sleep_t)
 
-
-# =============================================================================
-# Named Moves
-# =============================================================================
-
-def move_to_home(robot, duration: float = LERP_DURATION_HOME) -> None:
-    """Smoothly move the robot to the predefined Home position."""
+def move_to_home(robot, duration: float = LERP_DURATION_HOME, safety_monitor=None) -> None:
     print(f">>> Moving to HOME over {duration:.1f}s …")
-    lerp_to_waypoint(robot, HOME_ACTION, duration)
-
+    lerp_to_waypoint(robot, HOME_ACTION, duration, safety_monitor=safety_monitor)
 
 def move_to_ready(
-    robot, 
-    task_type: str, 
-    duration: float = LERP_DURATION_LIFT,
-    pan_override: Optional[float] = None
+    robot, task_type: str, duration: float = LERP_DURATION_LIFT,
+    pan_override: Optional[float] = None, safety_monitor=None
 ) -> None:
     """
     Move to the task-specific approach / ready position.
@@ -217,23 +180,10 @@ def move_to_ready(
         ValueError if task_type is not present in READY_POSITIONS.
     """
     base_target = READY_POSITIONS.get(task_type)
-    if base_target is None:
-        raise ValueError(
-            f"Unknown task_type '{task_type}'. "
-            f"Expected one of: {list(READY_POSITIONS.keys())}"
-        )
-        
     target = base_target.copy()
-    if pan_override is not None:
-        target["shoulder_pan.pos"] = pan_override
-        
+    if pan_override is not None: target["shoulder_pan.pos"] = pan_override
     print(f">>> Moving to READY [{task_type}] over {duration:.1f}s …")
-    lerp_to_waypoint(
-        robot,
-        target,
-        duration,
-        fixed_joints={"gripper.pos": GRIPPER_OPEN_POS},
-    )
+    lerp_to_waypoint(robot, target, duration, fixed_joints={"gripper.pos": GRIPPER_OPEN_POS}, safety_monitor=safety_monitor)
 
 def execute_failure_shake(robot) -> None:
     """
@@ -243,39 +193,21 @@ def execute_failure_shake(robot) -> None:
     print("  [Motion] Executing failure 'shake' motion...")
     obs = robot.get_observation()
     base_pose = {j: float(obs.get(j, HOME_ACTION.get(j, 0.0))) for j in JOINT_NAMES}
-    
     shake_poses = []
     
-    # Shake right
-    pose1 = base_pose.copy()
-    pose1["shoulder_pan.pos"] = -20.0
-    pose1["wrist_roll.pos"] = -20.0
+    pose1 = base_pose.copy(); pose1["shoulder_pan.pos"] = -20.0; pose1["wrist_roll.pos"] = -20.0
     shake_poses.append(pose1)
-    
-    # Shake left
-    pose2 = base_pose.copy()
-    pose2["shoulder_pan.pos"] = 20.0
-    pose2["wrist_roll.pos"] = 20.0
+    pose2 = base_pose.copy(); pose2["shoulder_pan.pos"] = 20.0; pose2["wrist_roll.pos"] = 20.0
     shake_poses.append(pose2)
-
-    # Return to base
     shake_poses.append(base_pose)
 
-    # Do it thrice
     for _ in range(3): 
-        for pose in shake_poses:
-            lerp_to_waypoint(robot, pose, 0.3)
-
-
-# =============================================================================
-# Scripted Transport Sequence
-# =============================================================================
+        for pose in shake_poses: lerp_to_waypoint(robot, pose, 0.3)
 
 def scripted_transport(
-    robot, 
-    task_type: str, 
-    grasp_obs: Dict, 
-    monitor_callback: Optional[Callable[[Dict[str, Any]], bool]] = None
+    robot, task_type: str, grasp_obs: Dict, 
+    monitor_callback: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    safety_monitor=None
 ) -> None:
     """
     Execute the deterministic pick-to-place trajectory using fluid Bezier arcs.
@@ -284,66 +216,51 @@ def scripted_transport(
     if not hasattr(scripted_transport, "drop_counter"):
         scripted_transport.drop_counter = 0
     
-    if task_type == "check_in":
-        base_waypoint = STORAGE_PLACE.copy()
-    elif task_type == "check_out":
-        base_waypoint = CHECKOUT_PLACE.copy()
-    elif task_type == "check_back":
-        base_waypoint = CHECKIN_PLACE.copy()
-    else:
-        base_waypoint = STORAGE_PLACE.copy()
+    base_waypoint = STORAGE_PLACE.copy()
+    if task_type == "check_out": base_waypoint = CHECKOUT_PLACE.copy()
+    elif task_type == "check_back": base_waypoint = CHECKIN_PLACE.copy()
 
-    # ── Calculate Grid Offset ──
     grid_offsets = [
-        {"shoulder_pan.pos": 0.0,  "wrist_flex.pos": 0.0},    # Center
-        {"shoulder_pan.pos": 2.0,  "wrist_flex.pos": 0.0},    # Right
-        {"shoulder_pan.pos": -2.0, "wrist_flex.pos": 0.0},    # Left
-        {"shoulder_pan.pos": 0.0,  "wrist_flex.pos": 2.0},    # Forward
-        {"shoulder_pan.pos": 0.0,  "wrist_flex.pos": -2.0},    # Back
+        {"shoulder_pan.pos": 0.0, "wrist_flex.pos": 0.0},
+        {"shoulder_pan.pos": 2.0, "wrist_flex.pos": 0.0},
+        {"shoulder_pan.pos": -2.0, "wrist_flex.pos": 0.0},
+        {"shoulder_pan.pos": 0.0, "wrist_flex.pos": 2.0},
+        {"shoulder_pan.pos": 0.0, "wrist_flex.pos": -2.0},
     ]
     
     offset = grid_offsets[scripted_transport.drop_counter % len(grid_offsets)]
     place_waypoint = base_waypoint.copy()
     place_waypoint["shoulder_pan.pos"] += offset["shoulder_pan.pos"]
     place_waypoint["wrist_flex.pos"] += offset["wrist_flex.pos"]
-    
-    scripted_transport.drop_counter += 1 # Increment for the next run!
+    scripted_transport.drop_counter += 1
 
     rng = np.random.default_rng()
     for joint in ("shoulder_lift.pos", "elbow_flex.pos", "wrist_flex.pos"):
         place_waypoint[joint] += rng.uniform(-PLACE_VARIATION_DEG, PLACE_VARIATION_DEG)
 
-    raw_grip       = float(grasp_obs.get("gripper.pos", GRIPPER_GRASP_POS))
+    raw_grip = float(grasp_obs.get("gripper.pos", GRIPPER_GRASP_POS))
     gripper_locked = min(raw_grip, GRIPPER_TRANSPORT_THRESHOLD) 
     transport_lock = {"gripper.pos": gripper_locked}
 
-    # ── Phase A: Sweeping Arc (Lift to Place) ──
-    print("  [Transport] Phase A — Sweeping Arc to placement zone …")
+    print("  [Transport] Sweeping Arc to placement zone …")
     arc_trajectory(
-        robot,
-        p_mid=LIFT_OVERRIDE,
-        p_end=place_waypoint,
-        duration=(LERP_DURATION_LIFT + LERP_DURATION_PLACE) * 0.8, # Speed up slightly
-        fixed_joints=transport_lock,
-        monitor_callback=monitor_callback,  # Only applied while holding the object!
+        robot, p_mid=LIFT_OVERRIDE, p_end=place_waypoint,
+        duration=(LERP_DURATION_LIFT + LERP_DURATION_PLACE) * 0.8,
+        fixed_joints=transport_lock, monitor_callback=monitor_callback,
+        safety_monitor=safety_monitor
     )
 
-    # ── Phase B: Open gripper ──
-    print("  [Transport] Phase B — Releasing cube …")
-    obs       = robot.get_observation()
+    print("  [Transport] Releasing cube …")
+    obs = robot.get_observation()
     drop_pose = {j: float(obs.get(j, place_waypoint.get(j, 0.0))) for j in JOINT_NAMES}
     drop_pose["gripper.pos"] = GRIPPER_OPEN_POS
-    lerp_to_waypoint(robot, drop_pose, LERP_DURATION_DROP)
+    lerp_to_waypoint(robot, drop_pose, LERP_DURATION_DROP, safety_monitor=safety_monitor)
 
-    # ── Phase C: Settle pause ──
-    print(f"  [Transport] Phase C — Settling pause ({POST_DROP_PAUSE:.2f}s) …")
     time.sleep(POST_DROP_PAUSE)
 
-    # ── Phase D: Sweeping Arc (Return Home) ──
-    print("  [Transport] Phase D — Sweeping Arc to home …")
+    print("  [Transport] Sweeping Arc to home …")
     arc_trajectory(
-        robot,
-        p_mid=LIFT_OVERRIDE,
-        p_end=HOME_ACTION,
+        robot, p_mid=LIFT_OVERRIDE, p_end=HOME_ACTION,
         duration=(LERP_DURATION_LIFT + LERP_DURATION_HOME) * 0.8,
+        safety_monitor=safety_monitor
     )
