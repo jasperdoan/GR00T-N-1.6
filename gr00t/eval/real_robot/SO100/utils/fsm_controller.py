@@ -7,11 +7,11 @@ from enum import Enum, auto
 
 from lerobot.utils.utils import log_say
 
-from utils.constants import JOINT_NAMES, GRIPPER_OPEN_POS
+from utils.constants import JOINT_NAMES, GRIPPER_OPEN_POS, DIR_CAMERA_WRIST
 from utils.motion import (
     move_to_home, move_to_ready, scripted_transport, lerp_to_waypoint, execute_failure_shake, GraspLostException
 )
-from utils.vision_utils import check_task_success, check_color_presence_front
+from utils.vision_utils import check_task_success, check_color_presence_front, save_workspace_snapshot
 
 
 class FSMState(Enum):
@@ -25,13 +25,14 @@ class FSMState(Enum):
 
 
 class EvaluationFSM:
-    def __init__(self, cfg, robot, runner, grasp_detector, task_type, target_object, source_zone, target_zone, baseline_img, safety_monitor=None, should_stop_cb=None):
+    def __init__(self, cfg, robot, runner, grasp_detector, task_type, target_object, source_zone, target_zone, baseline_img, run_id="eval", safety_monitor=None, should_stop_cb=None):
         self.cfg = cfg
         self.robot = robot
         self.runner = runner
         self.grasp_detector = grasp_detector
         self.safety_monitor = safety_monitor
         self.should_stop_cb = should_stop_cb
+        self.run_id = run_id
         
         self.task_type = task_type
         self.target_object = target_object
@@ -78,6 +79,17 @@ class EvaluationFSM:
         else:
             print(f"\n✅ [PRE_CHECK PASSED] Object color detected ({px_count} px). Proceeding to task.")
             move_to_ready(self.robot, self.task_type, safety_monitor=self.safety_monitor)
+            
+            # Take wrist snapshot safely at the READY position
+            obs = self.robot.get_observation()
+            save_workspace_snapshot(
+                obs["wrist"], 
+                f"snapshot_{self.run_id}_wrist.jpg", 
+                None, 
+                self.target_object, 
+                output_dir=DIR_CAMERA_WRIST
+            )
+            
             self.state = FSMState.SEARCHING
 
     def _handle_searching(self):

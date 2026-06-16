@@ -131,36 +131,40 @@ class SafetyMonitor:
 # =============================================================================
 
 def save_workspace_snapshot(
-    front_img: np.ndarray, 
+    img: np.ndarray, 
     filename: str, 
-    zones_dict: Dict[str, Tuple[int, int, int, int]], 
+    zones_dict: Optional[Dict[str, Tuple[int, int, int, int]]], 
     target_object: str,
-    padding: int = 0,
-    output_dir: str = "/workspaces/data/outputs/GR00T-N-1.6"
+    output_dir: str,
+    padding: int = 0
 ):
-    """Saves the workspace image, drawing a bounding box ONLY for the specific target_object."""
-    
-    # 1. Create the directory if it doesn't exist
+    """Saves a workspace/wrist image. If zones_dict is None, searches the full image."""
     os.makedirs(output_dir, exist_ok=True)
-    
-    # 2. Construct the full file path
     filepath = os.path.join(output_dir, os.path.basename(filename))
     
-    img_bgr = cv2.cvtColor(_ensure_uint8(front_img), cv2.COLOR_RGB2BGR)
+    img_bgr = cv2.cvtColor(_ensure_uint8(img), cv2.COLOR_RGB2BGR)
     h_img, w_img = img_bgr.shape[:2]
 
     target_color = target_object.split()[0].lower()
     ranges = COLOR_RANGES.get(target_color, None)
 
     if ranges is None:
-        cv2.imwrite(filepath, img_bgr)  # Use filepath instead of filename
+        cv2.imwrite(filepath, img_bgr)
         print(f"[Vision] Snapshot saved. (No box drawn - unknown color '{target_color}')")
         return
 
     hsv_full = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
     hsv_full = _enhance_saturation(hsv_full, factor=1.4)
 
-    for zone_name, zone_coords in zones_dict.items():
+    # If no zones dict provided (e.g. for wrist), process the entire image as one big zone
+    if not zones_dict:
+        zones_to_process = {"Full_Image": (0, 0, w_img, h_img)}
+        draw_zone_box = False
+    else:
+        zones_to_process = zones_dict
+        draw_zone_box = True
+
+    for zone_name, zone_coords in zones_to_process.items():
         x, y, w, h = zone_coords
         
         px = max(0, x - padding)
@@ -168,9 +172,11 @@ def save_workspace_snapshot(
         pw = min(w_img - px, w + 2 * padding)
         ph = min(h_img - py, h + 2 * padding)
 
-        cv2.rectangle(img_bgr, (px, py), (px + pw, py + ph), (255, 255, 255), 1)
-        cv2.putText(img_bgr, f"Zone: {zone_name}", (px, max(0, py - 5)), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        # Only draw the white zone rectangle if specific zones were provided
+        if draw_zone_box:
+            cv2.rectangle(img_bgr, (px, py), (px + pw, py + ph), (255, 255, 255), 1)
+            cv2.putText(img_bgr, f"Zone: {zone_name}", (px, max(0, py - 5)), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
         crop_hsv = hsv_full[py:py+ph, px:px+pw]
 
@@ -190,8 +196,8 @@ def save_workspace_snapshot(
                 cv2.putText(img_bgr, target_object.title(), (abs_x, max(0, abs_y - 8)), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-    cv2.imwrite(filepath, img_bgr)  # Use filepath instead of filename
-    print(f"[Vision] Workspace snapshot saved to {filepath}")
+    cv2.imwrite(filepath, img_bgr)
+    print(f"[Vision] Snapshot saved to {filepath}")
 
 
 # =============================================================================
@@ -220,7 +226,7 @@ def check_color_presence_front(front_img, target_object, zone, debug=False) -> T
     return px_count >= FRONT_MIN_PRESENCE_PX, px_count
 
 class GraspDetector:
-    def __init__(self, baseline_wrist_img: np.ndarray):
+    def __init__(self):
         self.history = collections.deque(maxlen=WRIST_CONFIRM_FRAMES)
         self.start_time = time.time()
         self.prev_gray = None
@@ -228,9 +234,6 @@ class GraspDetector:
         self.locked_color_mass = None
         self.transit_lost_count = 0
         self.roi_area = WRIST_GRASP_ROI[2] * WRIST_GRASP_ROI[3]
-        safe_base = _ensure_uint8(baseline_wrist_img)
-        x, y, w, h = WRIST_GRASP_ROI
-        self.baseline_gray = cv2.cvtColor(safe_base[y:y+h, x:x+w], cv2.COLOR_BGR2GRAY)
 
     def extract_color_pixels(self, rgb_img: np.ndarray, target_object: str) -> int:
         hsv = _enhance_saturation(cv2.cvtColor(rgb_img, cv2.COLOR_RGB2HSV), factor=1.4)

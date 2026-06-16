@@ -3,6 +3,12 @@ SO100 Constants: Workspace zones, color ranges, home position, and scripted wayp
 """
 
 # =============================================================================
+# Output Directories
+# =============================================================================
+DIR_CAMERA_TOP   = "/workspaces/data/outputs/camera/top"
+DIR_CAMERA_WRIST = "/workspaces/data/outputs/camera/wrist"
+
+# =============================================================================
 # Workspace Zone Definitions (x, y, width, height) in front-camera pixels
 # =============================================================================
 

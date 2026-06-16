@@ -24,7 +24,7 @@ from utils.policy_runner  import AsyncPolicyRunner
 from utils.vision_utils   import GraspDetector, SafetyMonitor, save_workspace_snapshot
 from utils.nlp_parser     import parse_instruction
 from utils.fsm_controller import EvaluationFSM, FSMState
-from utils.constants      import CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE
+from utils.constants      import CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE, DIR_CAMERA_TOP
 
 @dataclass
 class EvalConfig:
@@ -89,18 +89,25 @@ def eval(cfg: EvalConfig):
         print(">>> Taking baseline snapshots of workspace...")
         baseline_obs = robot.get_observation()
         baseline_img = baseline_obs["front"]
-        baseline_wrist = baseline_obs["wrist"]
 
-        save_workspace_snapshot(baseline_img, "snapshot_eval_before.jpg", ALL_ZONES_DICT, target_object, padding=40)
+        save_workspace_snapshot(
+            baseline_img, 
+            "snapshot_eval_front_before.jpg", 
+            ALL_ZONES_DICT, 
+            target_object, 
+            output_dir=DIR_CAMERA_TOP,
+            padding=40
+        )
 
-        grasp_detector = GraspDetector(baseline_wrist_img=baseline_wrist)
+        grasp_detector = GraspDetector()
         
         fsm = EvaluationFSM(
             cfg=cfg, robot=robot, runner=runner, grasp_detector=grasp_detector,
             safety_monitor=safety_monitor, should_stop_cb=is_stop_requested,
             task_type=task_type, target_object=target_object, 
             source_zone=source_zone, target_zone=target_zone, 
-            baseline_img=baseline_img
+            baseline_img=baseline_img,
+            run_id="eval"
         )
         
         final_state = fsm.run()
@@ -109,7 +116,14 @@ def eval(cfg: EvalConfig):
         time.sleep(1.0)
         final_obs = robot.get_observation()
         
-        save_workspace_snapshot(final_obs["front"], "snapshot_eval_after.jpg", ALL_ZONES_DICT, target_object, padding=40)
+        save_workspace_snapshot(
+            final_obs["front"], 
+            "snapshot_eval_front_after.jpg", 
+            ALL_ZONES_DICT, 
+            target_object, 
+            output_dir=DIR_CAMERA_TOP,
+            padding=40
+        )
 
         if final_state == FSMState.FAILED:
             print("\n❌ [EVALUATION FAILED] The robot was unable to complete the task.")

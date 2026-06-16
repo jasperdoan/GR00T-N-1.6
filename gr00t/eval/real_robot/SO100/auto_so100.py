@@ -27,7 +27,7 @@ from utils.motion         import move_to_home
 from utils.policy_runner  import AsyncPolicyRunner
 from utils.vision_utils   import GraspDetector, check_color_presence_front, SafetyMonitor, save_workspace_snapshot
 from utils.fsm_controller import EvaluationFSM, FSMState
-from utils.constants      import CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE
+from utils.constants      import CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE, DIR_CAMERA_TOP
 
 @dataclass
 class EvalConfig:
@@ -124,10 +124,16 @@ def auto_eval(cfg: EvalConfig):
             print(f"\n>>> [Run #{run_counter}] Taking baseline snapshots of workspace...")
             baseline_obs = robot.get_observation()
             baseline_img = baseline_obs["front"]
-            baseline_wrist = baseline_obs["wrist"]
 
             # Only draw bounding box for the target object
-            save_workspace_snapshot(baseline_img, f"snapshot_run_{run_counter}_before.jpg", ALL_ZONES_DICT, target_object, padding=40)
+            save_workspace_snapshot(
+                baseline_img, 
+                f"snapshot_run_{run_counter}_front_before.jpg", 
+                ALL_ZONES_DICT, 
+                target_object, 
+                output_dir=DIR_CAMERA_TOP,
+                padding=40
+            )
 
             task_type = detect_next_task(baseline_img, target_object)
 
@@ -142,7 +148,7 @@ def auto_eval(cfg: EvalConfig):
             print(f"\n[AUTO DEMO] Task Sequence Selected : {task_type.upper()}")
             print(f"[AUTO DEMO] Target Object          : {target_object}")
 
-            grasp_detector = GraspDetector(baseline_wrist_img=baseline_wrist)
+            grasp_detector = GraspDetector()
             
             fsm = EvaluationFSM(
                 cfg=cfg, robot=robot, runner=runner,
@@ -150,7 +156,8 @@ def auto_eval(cfg: EvalConfig):
                 should_stop_cb=is_stop_requested,
                 task_type=task_type, target_object=target_object,
                 source_zone=source_zone, target_zone=target_zone,
-                baseline_img=baseline_img
+                baseline_img=baseline_img,
+                run_id=f"run_{run_counter}"
             )
             
             final_state = fsm.run()
@@ -159,7 +166,14 @@ def auto_eval(cfg: EvalConfig):
             time.sleep(1.0)
             final_obs = robot.get_observation()
             
-            save_workspace_snapshot(final_obs["front"], f"snapshot_run_{run_counter}_after.jpg", ALL_ZONES_DICT, target_object, padding=40)
+            save_workspace_snapshot(
+                final_obs["front"], 
+                f"snapshot_run_{run_counter}_front_after.jpg", 
+                ALL_ZONES_DICT, 
+                target_object, 
+                output_dir=DIR_CAMERA_TOP,
+                padding=40
+            )
 
             if final_state == FSMState.FAILED:
                 print("\n❌ [AUTO DEMO FAILED] FSM aborted. Rescanning...")
