@@ -2,6 +2,7 @@
 SO100 Vision Utilities (Signal-Based Tracking & Safety)
 """
 
+import os
 import collections
 import time
 import multiprocessing as mp_lib
@@ -134,9 +135,17 @@ def save_workspace_snapshot(
     filename: str, 
     zones_dict: Dict[str, Tuple[int, int, int, int]], 
     target_object: str,
-    padding: int = 0
+    padding: int = 0,
+    output_dir: str = "/workspaces/data/outputs/GR00T-N-1.6"
 ):
     """Saves the workspace image, drawing a bounding box ONLY for the specific target_object."""
+    
+    # 1. Create the directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 2. Construct the full file path
+    filepath = os.path.join(output_dir, os.path.basename(filename))
+    
     img_bgr = cv2.cvtColor(_ensure_uint8(front_img), cv2.COLOR_RGB2BGR)
     h_img, w_img = img_bgr.shape[:2]
 
@@ -144,7 +153,7 @@ def save_workspace_snapshot(
     ranges = COLOR_RANGES.get(target_color, None)
 
     if ranges is None:
-        cv2.imwrite(filename, img_bgr)
+        cv2.imwrite(filepath, img_bgr)  # Use filepath instead of filename
         print(f"[Vision] Snapshot saved. (No box drawn - unknown color '{target_color}')")
         return
 
@@ -181,8 +190,8 @@ def save_workspace_snapshot(
                 cv2.putText(img_bgr, target_object.title(), (abs_x, max(0, abs_y - 8)), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-    cv2.imwrite(filename, img_bgr)
-    print(f"[Vision] Workspace snapshot saved to {filename}")
+    cv2.imwrite(filepath, img_bgr)  # Use filepath instead of filename
+    print(f"[Vision] Workspace snapshot saved to {filepath}")
 
 
 # =============================================================================
