@@ -24,7 +24,7 @@ from utils.policy_runner  import AsyncPolicyRunner
 from utils.vision_utils   import GraspDetector, SafetyMonitor, save_workspace_snapshot
 from utils.nlp_parser     import parse_instruction
 from utils.fsm_controller import EvaluationFSM, FSMState
-from utils.constants      import CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE, DIR_CAMERA_TOP
+from utils.constants      import CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE, DIR_CAMERA, DIR_CAMERA_FRONT
 
 @dataclass
 class EvalConfig:
@@ -95,7 +95,7 @@ def eval(cfg: EvalConfig):
             "snapshot_eval_front_before.jpg", 
             ALL_ZONES_DICT, 
             target_object, 
-            output_dir=DIR_CAMERA_TOP,
+            output_dir=DIR_CAMERA,
             padding=40
         )
 
@@ -121,7 +121,15 @@ def eval(cfg: EvalConfig):
             "snapshot_eval_front_after.jpg", 
             ALL_ZONES_DICT, 
             target_object, 
-            output_dir=DIR_CAMERA_TOP,
+            output_dir=DIR_CAMERA,
+            padding=40
+        )
+        save_workspace_snapshot(
+            final_obs["front"], 
+            "eval_front.jpg", 
+            ALL_ZONES_DICT, 
+            target_object, 
+            output_dir=DIR_CAMERA_FRONT,
             padding=40
         )
 

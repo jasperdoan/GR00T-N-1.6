@@ -112,6 +112,8 @@ class SafetyMonitor:
                 # LATENCY FIX: queue.get() naturally blocks without burning CPU. 
                 # The moment a frame hits the queue, it processes instantly.
                 frame = queue.get() 
+                if frame is None:
+                    break
                 img_u8 = _ensure_uint8(frame)
                 
                 results = hands.process(img_u8)
@@ -121,10 +123,26 @@ class SafetyMonitor:
 
     def stop(self):
         """Cleanly shuts down the process on exit."""
-        if self._process and self._process.is_alive():
-            self._process.terminate()
-            self._process.join()
+        if self.enabled:
+            try:
+                # Clear queue if full to ensure None can be pushed
+                while not self.frame_queue.empty():
+                    self.frame_queue.get_nowait()
+            except Exception:
+                pass
+            try:
+                self.frame_queue.put_nowait(None)
+            except Exception:
+                pass
 
+        if hasattr(self, 'frame_queue') and hasattr(self.frame_queue, 'cancel_join_thread'):
+            self.frame_queue.cancel_join_thread()
+
+        if self._process and self._process.is_alive():
+            self._process.join(timeout=1.0)
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(timeout=1.0)
 
 # =============================================================================
 # Workspace Snapshot Annotator (Target Object Bounding Box)

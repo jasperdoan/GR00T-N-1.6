@@ -7,7 +7,7 @@ from enum import Enum, auto
 
 from lerobot.utils.utils import log_say
 
-from utils.constants import JOINT_NAMES, GRIPPER_OPEN_POS, DIR_CAMERA_WRIST
+from utils.constants import JOINT_NAMES, GRIPPER_OPEN_POS, DIR_CAMERA, DIR_CAMERA_WRIST
 from utils.motion import (
     move_to_home, move_to_ready, scripted_transport, lerp_to_waypoint, execute_failure_shake, GraspLostException
 )
@@ -85,6 +85,13 @@ class EvaluationFSM:
             save_workspace_snapshot(
                 obs["wrist"], 
                 f"snapshot_{self.run_id}_wrist.jpg", 
+                None, 
+                self.target_object, 
+                output_dir=DIR_CAMERA
+            )
+            save_workspace_snapshot(
+                obs["wrist"], 
+                f"{self.run_id}_wrist.jpg", 
                 None, 
                 self.target_object, 
                 output_dir=DIR_CAMERA_WRIST

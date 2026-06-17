@@ -27,7 +27,7 @@ from utils.motion         import move_to_home
 from utils.policy_runner  import AsyncPolicyRunner
 from utils.vision_utils   import GraspDetector, check_color_presence_front, SafetyMonitor, save_workspace_snapshot
 from utils.fsm_controller import EvaluationFSM, FSMState
-from utils.constants      import CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE, DIR_CAMERA_TOP
+from utils.constants      import CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE, DIR_CAMERA, DIR_CAMERA_FRONT
 
 @dataclass
 class EvalConfig:
@@ -110,8 +110,6 @@ def auto_eval(cfg: EvalConfig):
 
         log_say("Hardware and policy initialized.", cfg.play_sounds)
 
-        run_counter = 1
-
         while True:
             if is_stop_requested():
                 print("\n🛑 [SHUTDOWN] Stop command detected. Exiting auto loop gracefully.")
@@ -121,17 +119,16 @@ def auto_eval(cfg: EvalConfig):
             move_to_home(robot, safety_monitor=safety_monitor)
             time.sleep(1.0)   
 
-            print(f"\n>>> [Run #{run_counter}] Taking baseline snapshots of workspace...")
+            print(f"\n>>> [Taking baseline snapshots of workspace...")
             baseline_obs = robot.get_observation()
             baseline_img = baseline_obs["front"]
 
-            # Only draw bounding box for the target object
             save_workspace_snapshot(
                 baseline_img, 
-                f"snapshot_run_{run_counter}_front_before.jpg", 
+                f"snapshot_auto_front_before.jpg", 
                 ALL_ZONES_DICT, 
                 target_object, 
-                output_dir=DIR_CAMERA_TOP,
+                output_dir=DIR_CAMERA,
                 padding=40
             )
 
@@ -157,7 +154,7 @@ def auto_eval(cfg: EvalConfig):
                 task_type=task_type, target_object=target_object,
                 source_zone=source_zone, target_zone=target_zone,
                 baseline_img=baseline_img,
-                run_id=f"run_{run_counter}"
+                run_id="auto"
             )
             
             final_state = fsm.run()
@@ -168,10 +165,18 @@ def auto_eval(cfg: EvalConfig):
             
             save_workspace_snapshot(
                 final_obs["front"], 
-                f"snapshot_run_{run_counter}_front_after.jpg", 
+                f"snapshot_auto_front_after.jpg", 
                 ALL_ZONES_DICT, 
                 target_object, 
-                output_dir=DIR_CAMERA_TOP,
+                output_dir=DIR_CAMERA,
+                padding=40
+            )
+            save_workspace_snapshot(
+                final_obs["front"], 
+                f"auto_front.jpg", 
+                ALL_ZONES_DICT, 
+                target_object, 
+                output_dir=DIR_CAMERA_FRONT,
                 padding=40
             )
 
@@ -179,8 +184,6 @@ def auto_eval(cfg: EvalConfig):
                 print("\n❌ [AUTO DEMO FAILED] FSM aborted. Rescanning...")
             elif final_state == FSMState.DONE:
                 print("\n✅ [AUTO DEMO PASSED] Task complete. Ready for next sequence...")
-                
-            run_counter += 1
                 
     except KeyboardInterrupt:
         pass 
