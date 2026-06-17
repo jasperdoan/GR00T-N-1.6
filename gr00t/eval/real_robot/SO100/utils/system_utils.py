@@ -38,7 +38,8 @@ def set_in_use():
     """Creates a flag file to indicate the robot is currently active/in-use."""
     try:
         with open(INUSE_FLAG_PATH, 'w') as f:
-            f.write("1")
+            # f.write("1")
+            pass
     except Exception as e:
         print(f"Failed to set in-use flag: {e}")
 
