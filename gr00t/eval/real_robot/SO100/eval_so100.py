@@ -5,7 +5,6 @@ SO100 Hybrid Modular Evaluation Script (FSM & Monitored Transit)
 
 import logging
 import time
-import signal
 import sys
 import os
 from dataclasses import asdict, dataclass
@@ -24,7 +23,8 @@ from utils.policy_runner  import AsyncPolicyRunner
 from utils.vision_utils   import GraspDetector, SafetyMonitor, save_workspace_snapshot
 from utils.nlp_parser     import parse_instruction
 from utils.fsm_controller import EvaluationFSM, FSMState
-from utils.constants      import CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE, DIR_CAMERA, DIR_CAMERA_FRONT
+from utils.constants      import CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE, DIR_CAMERA, DIR_CAMERA_FRONT, ALL_ZONES_DICT
+from utils.system_utils   import setup_signal_handlers, is_stop_requested, set_in_use, clear_in_use, clear_stop_flag
 
 @dataclass
 class EvalConfig:
@@ -39,32 +39,14 @@ class EvalConfig:
     replan_every:      int   = 6
     ensemble_temp:     float = 0.1
 
-ALL_ZONES_DICT = {
-    "Check In": CHECK_IN_ZONE,
-    "Storage": STORAGE_ZONE,
-    "Check Out": CHECK_OUT_ZONE
-}
-
-graceful_stop_requested = False
-
-def request_graceful_stop(sig, frame):
-    global graceful_stop_requested
-    if graceful_stop_requested:
-        print("\n🚨 [HARD STOP] Forced exit requested! Terminating immediately (No Home Sequence).")
-        os._exit(1)
-    print("\n⏳ [SOFT STOP] Stop signal received. Finishing current movement then returning home...")
-    graceful_stop_requested = True
-
-signal.signal(signal.SIGINT, request_graceful_stop)
-signal.signal(signal.SIGTERM, request_graceful_stop)
-
-def is_stop_requested():
-    return graceful_stop_requested
-
 @draccus.wrap()
 def eval(cfg: EvalConfig):
     init_logging()
     logging.info(pformat(asdict(cfg)))
+
+    setup_signal_handlers()
+    clear_stop_flag()
+    set_in_use()
 
     task_type, target_object, source_zone, target_zone = parse_instruction(cfg.lang_instruction)
     safety_monitor = SafetyMonitor(enabled=True)
@@ -159,7 +141,8 @@ def eval(cfg: EvalConfig):
         if 'robot' in locals():
             try: robot.disconnect()
             except Exception: pass
-            
+
+        clear_in_use()
         print(">>> System shut down cleanly.\n")
 
 if __name__ == "__main__":

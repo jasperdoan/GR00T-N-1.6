@@ -9,7 +9,6 @@ where the red cube is, and executes the corresponding next logical step.
 import logging
 import time
 import os
-import signal
 import sys
 from dataclasses import asdict, dataclass
 from pprint import pformat
@@ -27,7 +26,8 @@ from utils.motion         import move_to_home
 from utils.policy_runner  import AsyncPolicyRunner
 from utils.vision_utils   import GraspDetector, check_color_presence_front, SafetyMonitor, save_workspace_snapshot
 from utils.fsm_controller import EvaluationFSM, FSMState
-from utils.constants      import CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE, DIR_CAMERA, DIR_CAMERA_FRONT
+from utils.constants      import CHECK_IN_ZONE, CHECK_OUT_ZONE, STORAGE_ZONE, DIR_CAMERA, DIR_CAMERA_FRONT, ALL_ZONES_DICT
+from utils.system_utils   import setup_signal_handlers, is_stop_requested, set_in_use, clear_in_use, clear_stop_flag
 
 @dataclass
 class EvalConfig:
@@ -48,12 +48,6 @@ ZONE_TASK_MAP = {
     "check_back": {"source": CHECK_OUT_ZONE, "target": CHECK_IN_ZONE},
 }
 
-ALL_ZONES_DICT = {
-    "Check In": CHECK_IN_ZONE,
-    "Storage": STORAGE_ZONE,
-    "Check Out": CHECK_OUT_ZONE
-}
-
 def detect_next_task(front_img, target_object="red cube") -> str:
     """Scans all three zones and returns the appropriate task type."""
     print(f"\n[AUTO-SCAN] Looking for '{target_object}' to determine next action...")
@@ -64,27 +58,14 @@ def detect_next_task(front_img, target_object="red cube") -> str:
             return task_type
     return None
 
-
-graceful_stop_requested = False
-
-def request_graceful_stop(sig, frame):
-    global graceful_stop_requested
-    if graceful_stop_requested:
-        print("\n🚨 [HARD STOP] Forced exit requested! Terminating immediately (No Home Sequence).")
-        os._exit(1)
-    print("\n⏳ [SOFT STOP] Stop signal received. Finishing current movement then returning home...")
-    graceful_stop_requested = True
-
-signal.signal(signal.SIGINT, request_graceful_stop)
-signal.signal(signal.SIGTERM, request_graceful_stop)
-
-def is_stop_requested():
-    return graceful_stop_requested or os.path.exists("/tmp/stop_so100.flag")
-
 @draccus.wrap()
 def auto_eval(cfg: EvalConfig):
     init_logging()
     logging.info(pformat(asdict(cfg)))
+
+    setup_signal_handlers()
+    clear_stop_flag()
+    set_in_use()
 
     print("\n=======================================================")
     print("🤖 SO100 AUTO DEMO MODE INITIALIZING...")
@@ -95,9 +76,6 @@ def auto_eval(cfg: EvalConfig):
 
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
-
-    if os.path.exists("/tmp/stop_so100.flag"):
-        os.remove("/tmp/stop_so100.flag")
 
     try:
         policy_client = PolicyClient(host=cfg.policy_host, port=cfg.policy_port)
@@ -113,7 +91,7 @@ def auto_eval(cfg: EvalConfig):
         while True:
             if is_stop_requested():
                 print("\n🛑 [SHUTDOWN] Stop command detected. Exiting auto loop gracefully.")
-                if os.path.exists("/tmp/stop_so100.flag"): os.remove("/tmp/stop_so100.flag")
+                clear_stop_flag()
                 break 
 
             move_to_home(robot, safety_monitor=safety_monitor)
@@ -206,7 +184,8 @@ def auto_eval(cfg: EvalConfig):
         if 'robot' in locals():
             try: robot.disconnect()
             except Exception: pass
-            
+
+        clear_in_use()
         print(">>> System shut down cleanly.\n")
 
 if __name__ == "__main__":

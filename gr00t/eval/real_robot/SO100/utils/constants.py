@@ -1,7 +1,3 @@
-"""
-SO100 Constants: Workspace zones, color ranges, home position, and scripted waypoints.
-"""
-
 # =============================================================================
 # Output Directories
 # =============================================================================
@@ -9,6 +5,11 @@ DIR_CAMERA_FRONT = "/workspaces/data/outputs/camera/front"
 DIR_CAMERA_WRIST = "/workspaces/data/outputs/camera/wrist"
 DIR_CAMERA       = "/workspaces/data/outputs/GR00T-N-1.6"
 
+# =============================================================================
+# System Flags & Zone Maps
+# =============================================================================
+INUSE_FLAG_PATH = "/tmp/so100_inuse.flag"
+STOP_FLAG_PATH  = "/tmp/stop_so100.flag"
 
 # =============================================================================
 # Workspace Zone Definitions (x, y, width, height) in front-camera pixels
@@ -17,6 +18,14 @@ DIR_CAMERA       = "/workspaces/data/outputs/GR00T-N-1.6"
 STORAGE_ZONE = (869, 483, 267, 249)
 CHECK_IN_ZONE = (595, 323, 263, 221)
 CHECK_OUT_ZONE = (1133, 311, 268, 216)
+
+
+ALL_ZONES_DICT = {
+    "Check In": CHECK_IN_ZONE,
+    "Storage": STORAGE_ZONE,
+    "Check Out": CHECK_OUT_ZONE
+}
+
 
 # =============================================================================
 # Language & Object Definitions
