@@ -24,6 +24,8 @@ from utils.constants import (
     GRASP_Z,
     FINE_ADJUST_SPEED,
     MATRIX_PATH,
+    MIN_BLOB_AREA_PX,
+    FRONT_MIN_PRESENCE_PX
 )
 
 try:
@@ -156,10 +158,6 @@ def pixel_to_robot(u: float, v: float, H: np.ndarray) -> Tuple[float, float]:
 # =============================================================================
 # HSV object detection (top-down camera)
 # =============================================================================
-
-MIN_BLOB_AREA_PX   = 100
-FRONT_MIN_PRESENCE_PX = 1500
-
 
 def _build_color_mask(hsv_img: np.ndarray, color_name: str) -> np.ndarray:
     ranges = COLOR_RANGES.get(color_name.lower())

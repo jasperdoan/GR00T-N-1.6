@@ -14,20 +14,14 @@ from utils.constants import (
     TOP_DOWN_CAM_IDX, WRIST_CAM_IDX,
     HOME_POSE,
     ZONES,
+    ALL_ZONES_DICT,
+    OUTPUT_DIR
 )
 from utils.system  import setup_signal_handlers, clear_stop_flag, set_in_use, clear_in_use, is_stop_requested
 from utils.nlp     import parse_instruction
 from utils.vision  import SafetyMonitor, save_workspace_snapshot
 from utils.robot   import Lite6Controller
 from utils.fsm     import Lite6FSM, FSMState
-
-OUTPUT_DIR = "/tmp/lite6_eval"
-
-ALL_ZONES_DICT = {
-    "Check In":  (0, 0, 200, 200),   # TODO: replace with real pixel ROIs after calibration
-    "Storage":   (200, 0, 200, 200),
-    "Check Out": (400, 0, 200, 200),
-}
 
 
 def main():

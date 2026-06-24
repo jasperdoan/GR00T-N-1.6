@@ -17,24 +17,16 @@ from utils.constants import (
     HOME_POSE,
     KNOWN_OBJECTS,
     ZONES,
+    ALL_ZONES_DICT,
+    OUTPUT_DIR,
+    DEFAULT_TASK,
+    SCAN_INTERVAL
 )
 from utils.system  import setup_signal_handlers, clear_stop_flag, set_in_use, clear_in_use, is_stop_requested
 from utils.vision  import SafetyMonitor, check_color_presence, save_workspace_snapshot
 from utils.robot   import Lite6Controller
 from utils.fsm     import Lite6FSM, FSMState
 from utils.nlp     import TASK_ZONE_MAP
-
-OUTPUT_DIR = "/tmp/lite6_auto"
-
-ALL_ZONES_DICT = {
-    "Check In":  (0, 0, 200, 200),   # TODO: replace with real pixel ROIs after calibration
-    "Storage":   (200, 0, 200, 200),
-    "Check Out": (400, 0, 200, 200),
-}
-
-# Auto mode default: always check_in anything found on the table
-DEFAULT_TASK  = "check_in"
-SCAN_INTERVAL = 3.0  # seconds between scans when idle
 
 
 def detect_any_object(cap_top) -> tuple:

@@ -5,9 +5,10 @@ Graceful shutdown, SIGINT/SIGTERM signal handling, and /tmp state flags.
 
 import os
 import signal
-
-INUSE_FLAG_PATH = "/tmp/lite6_inuse.flag"
-STOP_FLAG_PATH  = "/tmp/stop_lite6.flag"
+from utils.constants import (
+    INUSE_FLAG_PATH,
+    STOP_FLAG_PATH
+)
 
 _graceful_stop_requested = False
 
