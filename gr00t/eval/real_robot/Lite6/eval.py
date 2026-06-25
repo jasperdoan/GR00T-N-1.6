@@ -13,15 +13,22 @@ from utils.constants import (
     DEFAULT_IP,
     TOP_DOWN_CAM_IDX, WRIST_CAM_IDX,
     HOME_POSE,
-    ZONES,
     ALL_ZONES_DICT,
-    OUTPUT_DIR
+    OUTPUT_DIR_EVAL,
 )
 from utils.system  import setup_signal_handlers, clear_stop_flag, set_in_use, clear_in_use, is_stop_requested
 from utils.nlp     import parse_instruction
-from utils.vision  import SafetyMonitor, save_workspace_snapshot
+from utils.vision  import SafetyMonitor, save_workspace_snapshot, open_camera, read_fresh
 from utils.robot   import Lite6Controller
 from utils.fsm     import Lite6FSM, FSMState
+
+
+def _snapshot(cap_top, filename, target_object):
+    ret, frame = read_fresh(cap_top)
+    if ret:
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        save_workspace_snapshot(frame_rgb, filename, target_object,
+                                OUTPUT_DIR_EVAL, ALL_ZONES_DICT)
 
 
 def main():
@@ -38,7 +45,7 @@ def main():
     clear_stop_flag()
     set_in_use()
 
-    # Parse instruction
+    # Parse instruction up front so a bad string fails before touching hardware.
     try:
         task_type, target_object, source_zone, target_zone = parse_instruction(args.instruction)
     except ValueError as e:
@@ -52,55 +59,34 @@ def main():
     print(f"[EVAL] Source zone   : {source_zone}")
     print(f"[EVAL] Target zone   : {target_zone}\n")
 
-    # Open cameras
-    cap_top   = cv2.VideoCapture(TOP_DOWN_CAM_IDX)
-    cap_wrist = cv2.VideoCapture(WRIST_CAM_IDX)
-
-    robot          = Lite6Controller(args.ip)
-    safety_monitor = SafetyMonitor(enabled=not args.no_safety)
-
+    cap_top = cap_wrist = None
+    robot = safety_monitor = None
     try:
-        robot.connect()
+        # Fail fast if a camera index is wrong, before enabling the arm.
+        cap_top   = open_camera(TOP_DOWN_CAM_IDX, "top-down camera")
+        cap_wrist = open_camera(WRIST_CAM_IDX, "wrist camera")
 
-        # Home position
+        robot = Lite6Controller(args.ip)
+        robot.connect()                       # raises on failure — no blind runs
+        safety_monitor = SafetyMonitor(enabled=not args.no_safety)
+
         robot.move_to(*HOME_POSE[:3])
         time.sleep(0.5)
 
-        # Before snapshot
-        ret, frame = cap_top.read()
-        if ret:
-            import cv2 as _cv2
-            frame_rgb = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
-            save_workspace_snapshot(frame_rgb, "snapshot_eval_front_before.jpg",
-                                    target_object, OUTPUT_DIR, ALL_ZONES_DICT)
+        _snapshot(cap_top, "snapshot_eval_front_before.jpg", target_object)
 
         fsm = Lite6FSM(
-            robot=robot,
-            cap_top=cap_top,
-            cap_wrist=cap_wrist,
-            task_type=task_type,
-            target_object=target_object,
-            source_zone=source_zone,
-            target_zone=target_zone,
-            vla_timeout=args.timeout,
-            max_retries=args.retries,
-            safety_monitor=safety_monitor,
-            should_stop_cb=is_stop_requested,
+            robot=robot, cap_top=cap_top, cap_wrist=cap_wrist,
+            task_type=task_type, target_object=target_object,
+            source_zone=source_zone, target_zone=target_zone,
+            vla_timeout=args.timeout, max_retries=args.retries,
+            safety_monitor=safety_monitor, should_stop_cb=is_stop_requested,
         )
-
         final_state = fsm.run()
 
-        # Return home
         robot.move_to(*HOME_POSE[:3])
         time.sleep(1.0)
-
-        # After snapshot
-        ret, frame = cap_top.read()
-        if ret:
-            import cv2 as _cv2
-            frame_rgb = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
-            save_workspace_snapshot(frame_rgb, "snapshot_eval_front_after.jpg",
-                                    target_object, OUTPUT_DIR, ALL_ZONES_DICT)
+        _snapshot(cap_top, "snapshot_eval_front_after.jpg", target_object)
 
         if final_state == FSMState.DONE:
             print("\n[EVAL] COMPLETE — task succeeded.")
@@ -109,16 +95,22 @@ def main():
 
     except KeyboardInterrupt:
         pass
+    except RuntimeError as e:
+        print(f"\n[EVAL] Fatal: {e}")
     finally:
         print("\n[EVAL] Cleaning up...")
-        safety_monitor.stop()
-        try:
-            robot.move_to(*HOME_POSE[:3])
-        except Exception:
-            pass
-        robot.disconnect()
-        cap_top.release()
-        cap_wrist.release()
+        if safety_monitor is not None:
+            safety_monitor.stop()
+        if robot is not None:
+            try:
+                robot.move_to(*HOME_POSE[:3])
+            except Exception:
+                pass
+            robot.disconnect()
+        if cap_top is not None:
+            cap_top.release()
+        if cap_wrist is not None:
+            cap_wrist.release()
         clear_in_use()
         print("[EVAL] Shutdown complete.")
 

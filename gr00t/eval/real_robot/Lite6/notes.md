@@ -120,16 +120,17 @@ The following critical system-level features must be implemented precisely as th
 *   **The Mechanism:**
     *   The main control loop passes downscaled frames $(256 \times 256)$ lazily to a shared-memory queue `frame_queue` (with a max capacity of 1 to prevent queue latency buildup).
     *   A shared boolean flag `hand_detected` is updated in $O(1)$ real-time.
-    *   At **every single step** of Cartesian travel or visual servoing, the robot queries this flag.
-    *   If `hand_detected` is `True`, the arm immediately halts, enters a loop sending its *current* pose continuously, and pauses all execution.
-    *   The moment the hand leaves the frame, the FSM automatically clears any stale commands and safely resumes execution from where it paused.
+    *   **Important Lite6 difference vs SO100:** SO100 streamed 30 fps joint actions, so a freeze halted within ~33 ms between actions. The Lite6 is commanded with *Cartesian trajectory* moves. A blocking `set_position(wait=True)` cannot be interrupted, so naively polling the flag only reacts *between* moves. To genuinely halt mid-trajectory, moves are issued **non-blocking** (`wait=False`) and `_safe_move` (in `fsm.py`) / the visual-servo loop poll `is_hand_present()` continuously while the arm is in motion.
+    *   When a hand appears, the controller calls `robot.pause()` → `arm.set_state(4)`, which **halts the in-flight trajectory immediately**. It holds until the hand leaves, then `robot.resume()` → `arm.set_state(0)` continues the queued motion from where it paused.
+    *   The servo timeout clock is reset across a pause so a long human interruption doesn't count as a servoing failure.
 
 ### 7.2. Graceful Shutdown & Signal Handling
 *   **The Mechanism:** Standard Ctrl+C (SIGINT) or SIGTERM must not result in the Lite 6 dropping payloads or locking up in an awkward position.
 *   **The Logic:**
-    *   Signal handlers catch exit requests and raise a soft-stop flag. 
-    *   If a movement is underway, the robot finishes the localized travel step safely, immediately halts the FSM, releases the object if safely hovering, executes a controlled transit back to the standard `HOME_POSE`, disconnects the API cleanly, and removes any `/tmp` flags.
-    *   If a user hits Ctrl+C a *second* time (double-tap), the system triggers a hard stop, bypassing the home sequence to act as a secondary software-level emergency stop.
+    *   Signal handlers catch exit requests and raise a soft-stop flag.
+    *   The FSM and `_safe_move` poll `should_stop_cb` at every state boundary and inside the move loop. On a soft stop, the current non-blocking move is paused, the FSM aborts to `FAILED`, and the `finally` block in `eval.py` / `auto.py` executes a controlled transit back to `HOME_POSE`, disconnects the API cleanly, and removes the `/tmp` flags.
+    *   If a user hits Ctrl+C a *second* time (double-tap), `system.py` triggers `os._exit(1)` — a hard stop that bypasses the home sequence, acting as a secondary software-level emergency stop.
+    *   Note: a soft stop issued *during* a blocking gripper actuation completes that actuation first; motion (the higher-risk part) is interruptible because moves are non-blocking.
 
 ### 7.3. Pre-Check Phase & Failure Shake
 *   **The Mechanism:** Before the robot even begins moving, it must verify the target actually exists.

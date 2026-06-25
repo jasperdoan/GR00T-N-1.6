@@ -20,12 +20,15 @@ from utils.constants import (
     COLOR_RANGES,
     VS_KP,
     CENTER_TOLERANCE_PX,
-    SAFE_Z,
-    GRASP_Z,
+    MAX_SERVO_STEP_MM,
+    SERVO_DEADBAND_PX,
+    CAMERA_CENTER_OFFSET,
     FINE_ADJUST_SPEED,
     MATRIX_PATH,
     MIN_BLOB_AREA_PX,
-    FRONT_MIN_PRESENCE_PX
+    FRONT_MIN_PRESENCE_PX,
+    WRIST_GRASP_ROI,
+    WRIST_GRASP_MIN_PX,
 )
 
 try:
@@ -52,6 +55,40 @@ def _enhance_saturation(hsv_img: np.ndarray, factor: float = 1.3) -> np.ndarray:
 def _clean_mask(mask: np.ndarray, kernel_size: int = 5) -> np.ndarray:
     kernel = np.ones((kernel_size, kernel_size), np.uint8)
     return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+
+# =============================================================================
+# Camera helpers
+# =============================================================================
+
+def open_camera(index: int, name: str = "camera"):
+    """
+    Open a VideoCapture, fail fast if the index is wrong, and minimise buffering
+    so the servo loop reads the LATEST frame instead of a stale buffered one.
+    Raises RuntimeError if the camera cannot be opened.
+    """
+    cap = cv2.VideoCapture(index)
+    if not cap.isOpened():
+        raise RuntimeError(f"[Vision] Could not open {name} at index {index}.")
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass  # not all backends support BUFFERSIZE
+    # Warm up: discard the first few frames so exposure/auto-WB settle.
+    for _ in range(5):
+        cap.read()
+    print(f"[Vision] Opened {name} at index {index}.")
+    return cap
+
+
+def read_fresh(cap):
+    """
+    Grab the most recent frame. With BUFFERSIZE=1 a single read is current, but
+    on backends that ignore it we grab twice to drop one buffered frame.
+    Returns (ret, frame_bgr).
+    """
+    cap.grab()
+    return cap.retrieve()
 
 
 # =============================================================================
@@ -195,20 +232,61 @@ def find_object_centroid(frame: np.ndarray, color_name: str) -> Optional[Tuple[i
     return cx, cy
 
 
-def check_color_presence(frame: np.ndarray, target_object: str) -> Tuple[bool, int]:
-    """Check if target_object color is present (above FRONT_MIN_PRESENCE_PX threshold)."""
+def check_color_presence(frame: np.ndarray, target_object: str, zone_roi=None) -> Tuple[bool, int]:
+    """
+    Check if target_object's color is present above FRONT_MIN_PRESENCE_PX.
+    If zone_roi=(x, y, w, h) is given, the search is restricted to that pixel
+    region — essential so PRE_CHECK (source zone) and VERIFY (target zone) can
+    actually distinguish "in the right zone" from "anywhere on the table".
+    """
     color_name = target_object.split()[0].lower()
     img_u8  = _ensure_uint8(frame)
     img_bgr = cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR) if img_u8.shape[2] == 3 else img_u8
+
+    if zone_roi is not None:
+        x, y, w, h = zone_roi
+        H_img, W_img = img_bgr.shape[:2]
+        x = max(0, min(x, W_img - 1)); y = max(0, min(y, H_img - 1))
+        w = max(1, min(w, W_img - x)); h = max(1, min(h, H_img - y))
+        img_bgr = img_bgr[y:y + h, x:x + w]
+
     hsv     = _enhance_saturation(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV), factor=1.4)
     mask    = _build_color_mask(hsv, color_name)
     px_count = int(np.sum(mask > 0))
     return px_count >= FRONT_MIN_PRESENCE_PX, px_count
 
 
+def confirm_grasp(wrist_frame: np.ndarray, target_object: str) -> Tuple[bool, int]:
+    """
+    Verify the object is actually in the gripper after a close, by masking the
+    target color inside the wrist-camera gripper ROI. This is the deterministic
+    IBVS analog of SO100's GraspDetector — a single color-mass check, not the
+    full optical-flow/history machinery (which was VLA-specific).
+    Returns (grasped, px_count).
+    """
+    color_name = target_object.split()[0].lower()
+    img_u8  = _ensure_uint8(wrist_frame)
+    img_bgr = cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR) if img_u8.shape[2] == 3 else img_u8
+
+    x, y, w, h = WRIST_GRASP_ROI
+    H_img, W_img = img_bgr.shape[:2]
+    x = max(0, min(x, W_img - 1)); y = max(0, min(y, H_img - 1))
+    w = max(1, min(w, W_img - x)); h = max(1, min(h, H_img - y))
+    roi = img_bgr[y:y + h, x:x + w]
+
+    hsv  = _enhance_saturation(cv2.cvtColor(roi, cv2.COLOR_BGR2HSV), factor=1.4)
+    mask = _build_color_mask(hsv, color_name)
+    px_count = int(np.sum(mask > 0))
+    return px_count >= WRIST_GRASP_MIN_PX, px_count
+
+
 # =============================================================================
 # Visual Servoing P-controller
 # =============================================================================
+
+def _clamp(value: float, limit: float) -> float:
+    return max(-limit, min(limit, value))
+
 
 def visual_servo_to_center(
     cap_wrist,
@@ -219,12 +297,21 @@ def visual_servo_to_center(
     should_stop_cb=None,
 ) -> bool:
     """
-    Proportional control loop: reads wrist camera, moves arm in XY until
-    the detected object centroid is within CENTER_TOLERANCE_PX of frame center.
+    IBVS proportional-control loop. Reads the wrist camera and nudges the arm in
+    XY until the detected object centroid reaches the aim point — the frame
+    center plus CAMERA_CENTER_OFFSET (compensating for the non-coaxial mount).
 
-    Returns True on success, False on timeout/abort.
+    Hardening over the naive version:
+      - aim point includes the hand-eye offset
+      - per-step delta is clamped (MAX_SERVO_STEP_MM) and dead-banded
+      - hand safety uses robot.pause()/resume() to halt an in-flight nudge
+      - every nudge checks move success and the arm's error state
+      - reads the freshest frame to avoid buffer-induced oscillation
+
+    Returns True once centered, False on timeout / abort / arm fault.
     """
     color_name = target_object.split()[0].lower()
+    off_x, off_y = CAMERA_CENTER_OFFSET
     start_time = time.time()
 
     print(f"[Vision] Starting visual servoing for '{target_object}'...")
@@ -238,32 +325,36 @@ def visual_servo_to_center(
             print("[Vision] Visual servoing TIMEOUT.")
             return False
 
-        ret, frame_bgr = cap_wrist.read()
+        if robot.has_error():
+            print("[Vision] Arm in error state during servoing — aborting.")
+            return False
+
+        ret, frame_bgr = read_fresh(cap_wrist)
         if not ret:
             time.sleep(0.033)
             continue
 
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
-        # Safety check
+        # --- Hand safety: pause the arm, hold until clear, then resume ---
         if safety_monitor:
             safety_monitor.update_frame(frame_rgb)
-            while safety_monitor.is_hand_present():
-                print("[SAFETY] Hand detected during visual servoing — holding position...")
-                pos = robot.get_current_position()
-                if pos:
-                    robot.move_to(*pos[:3], speed=FINE_ADJUST_SPEED, wait=False)
-                time.sleep(0.1)
-                ret2, f2 = cap_wrist.read()
-                if ret2:
-                    safety_monitor.update_frame(cv2.cvtColor(f2, cv2.COLOR_BGR2RGB))
-                if not safety_monitor.is_hand_present():
-                    print("[SAFETY] Hand removed — resuming visual servoing.")
-                    start_time = time.time()
-                    break
+            if safety_monitor.is_hand_present():
+                print("[SAFETY] Hand detected during servoing — pausing arm...")
+                robot.pause()
+                while safety_monitor.is_hand_present():
+                    time.sleep(0.05)
+                    r2, f2 = read_fresh(cap_wrist)
+                    if r2:
+                        safety_monitor.update_frame(cv2.cvtColor(f2, cv2.COLOR_BGR2RGB))
+                robot.resume()
+                print("[SAFETY] Hand removed — resuming servoing.")
+                start_time = time.time()   # don't penalise the pause against the timeout
+                continue
 
         h, w = frame_bgr.shape[:2]
-        frame_cx, frame_cy = w // 2, h // 2
+        aim_x = w // 2 + off_x
+        aim_y = h // 2 + off_y
 
         centroid = find_object_centroid(frame_rgb, color_name)
         if centroid is None:
@@ -271,35 +362,30 @@ def visual_servo_to_center(
             continue
 
         obj_cx, obj_cy = centroid
-        err_x = obj_cx - frame_cx
-        err_y = obj_cy - frame_cy
+        err_x = obj_cx - aim_x
+        err_y = obj_cy - aim_y
 
         if abs(err_x) < CENTER_TOLERANCE_PX and abs(err_y) < CENTER_TOLERANCE_PX:
-            print(f"[Vision] Object centered (err_x={err_x}, err_y={err_y}). Locked.")
+            print(f"[Vision] Object centered (err=({err_x},{err_y})). Locked.")
             return True
+
+        # Dead-band sub-pixel jitter so we don't chatter near the target.
+        cmd_err_x = 0 if abs(err_x) < SERVO_DEADBAND_PX else err_x
+        cmd_err_y = 0 if abs(err_y) < SERVO_DEADBAND_PX else err_y
 
         pos = robot.get_current_position()
         if pos is None:
             time.sleep(0.033)
             continue
 
-        # Camera frame: positive err_x = object is to the right → move +Y in robot frame
-        # Mapping depends on camera orientation; adjust signs as needed after physical test
-        dx = VS_KP * err_x
-        dy = VS_KP * err_y
+        # P-control with a per-step clamp. Sign mapping (camera px -> robot mm)
+        # depends on the wrist-camera orientation; flip signs here after a bench test.
+        dx = _clamp(VS_KP * cmd_err_x, MAX_SERVO_STEP_MM)
+        dy = _clamp(VS_KP * cmd_err_y, MAX_SERVO_STEP_MM)
 
-        robot.move_to(
-            pos[0] + dx,
-            pos[1] + dy,
-            pos[2],
-            speed=FINE_ADJUST_SPEED,
-            wait=True,
-        )
-
-        elapsed = time.time() - start_time
-        remaining = timeout - elapsed
-        if remaining <= 0:
-            print("[Vision] Visual servoing TIMEOUT after move.")
+        if not robot.move_to(pos[0] + dx, pos[1] + dy, pos[2],
+                             speed=FINE_ADJUST_SPEED, wait=True):
+            print("[Vision] Servo nudge failed (rejected/faulted) — aborting.")
             return False
 
     return False
