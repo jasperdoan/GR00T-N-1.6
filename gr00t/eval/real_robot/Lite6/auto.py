@@ -14,8 +14,8 @@ import cv2
 
 from utils.constants import (
     DEFAULT_IP,
-    TOP_DOWN_CAM_IDX, WRIST_CAM_IDX,
-    HOME_POSE,
+    WRIST_CAM_IDX,
+    HOME_POSE, TOP_VIEW_POSE,
     ZONE_PIXEL_ROI,
     ALL_ZONES_DICT,
     OUTPUT_DIR_AUTO,
@@ -63,11 +63,11 @@ def main():
     print("  LITE6 AUTO MODE INITIALIZING...")
     print("=======================================================\n")
 
-    cap_top = cap_wrist = None
+    cap = None
     robot = safety_monitor = None
     try:
-        cap_top   = open_camera(TOP_DOWN_CAM_IDX, "top-down camera")
-        cap_wrist = open_camera(WRIST_CAM_IDX, "wrist camera")
+        # Single physical camera (wrist), reused for the top-down view at TOP_VIEW_POSE.
+        cap = open_camera(WRIST_CAM_IDX, "wrist camera")
 
         robot = Lite6Controller(args.ip)
         robot.connect()
@@ -78,12 +78,13 @@ def main():
                 print("\n[AUTO] Stop command received — exiting loop gracefully.")
                 break
 
-            robot.move_to(*HOME_POSE[:3])
-            time.sleep(1.0)
+            # Park at the top-view pose so the wrist camera sees the whole workspace.
+            robot.move_to(*TOP_VIEW_POSE)
+            time.sleep(0.5)
 
-            ret, frame = read_fresh(cap_top)
+            ret, frame = read_fresh(cap)
             if not ret:
-                print("[AUTO] Top-down read failed; retrying...")
+                print("[AUTO] Top-view read failed; retrying...")
                 time.sleep(SCAN_INTERVAL)
                 continue
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -100,7 +101,7 @@ def main():
             print(f"\n[AUTO] Task: {task_type.upper()}  |  Object: {AUTO_TARGET}")
 
             fsm = Lite6FSM(
-                robot=robot, cap_top=cap_top, cap_wrist=cap_wrist,
+                robot=robot, cap=cap,
                 task_type=task_type, target_object=AUTO_TARGET,
                 source_zone=source_zone, target_zone=target_zone,
                 vla_timeout=args.timeout, max_retries=args.retries,
@@ -108,14 +109,15 @@ def main():
             )
             final_state = fsm.run()
 
-            robot.move_to(*HOME_POSE[:3])
-            time.sleep(1.0)
-
-            ret, frame = read_fresh(cap_top)
+            # Top-view "after" snapshot, then park home.
+            robot.move_to(*TOP_VIEW_POSE)
+            ret, frame = read_fresh(cap)
             if ret:
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 save_workspace_snapshot(frame_rgb, "snapshot_auto_front_after.jpg",
                                         AUTO_TARGET, OUTPUT_DIR_AUTO, ALL_ZONES_DICT)
+            robot.move_to(*HOME_POSE[:3])
+            time.sleep(1.0)
 
             if final_state == FSMState.DONE:
                 print("\n[AUTO] Task complete. Rescanning...")
@@ -137,10 +139,8 @@ def main():
             except Exception:
                 pass
             robot.disconnect()
-        if cap_top is not None:
-            cap_top.release()
-        if cap_wrist is not None:
-            cap_wrist.release()
+        if cap is not None:
+            cap.release()
         clear_in_use()
         print("[AUTO] Shutdown complete.")
 

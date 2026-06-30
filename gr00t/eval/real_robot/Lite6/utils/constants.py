@@ -1,9 +1,8 @@
 import os
 
 # --- NETWORK & SYSTEM ---
-DEFAULT_IP = "192.168.1.150"
+DEFAULT_IP = "192.168.1.189"
 WRIST_CAM_IDX = 0
-TOP_DOWN_CAM_IDX = 1
 
 INUSE_FLAG_PATH = "/tmp/lite6_inuse.flag"
 STOP_FLAG_PATH  = "/tmp/stop_lite6.flag"

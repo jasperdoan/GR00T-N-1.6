@@ -27,7 +27,7 @@ from typing import Optional
 import cv2
 
 from utils.constants import (
-    ZONES, ZONE_PIXEL_ROI, HOME_POSE,
+    ZONES, ZONE_PIXEL_ROI, HOME_POSE, TOP_VIEW_POSE,
     SAFE_Z, GRASP_Z,
     DEFAULT_SPEED, FINE_ADJUST_SPEED,
 )
@@ -59,8 +59,7 @@ class Lite6FSM:
     def __init__(
         self,
         robot,
-        cap_top,
-        cap_wrist,
+        cap,
         task_type: str,
         target_object: str,
         source_zone: str,
@@ -71,8 +70,7 @@ class Lite6FSM:
         should_stop_cb=None,
     ):
         self.robot          = robot
-        self.cap_top        = cap_top
-        self.cap_wrist      = cap_wrist
+        self.cap            = cap
         self.task_type      = task_type
         self.target_object  = target_object
         self.source_zone    = source_zone
@@ -131,7 +129,7 @@ class Lite6FSM:
     # Returns True on success, False on rejection/fault/abort.
     # -------------------------------------------------------------------------
 
-    def _safe_move(self, x, y, z, speed=DEFAULT_SPEED) -> bool:
+    def _safe_move(self, x, y, z, roll=-180.0, pitch=0.0, yaw=0.0, speed=DEFAULT_SPEED) -> bool:
         # Don't even start into a workspace the hand is currently occupying.
         if self.safety_monitor:
             while self.safety_monitor.is_hand_present():
@@ -141,7 +139,7 @@ class Lite6FSM:
         if self._check_abort():
             return False
 
-        if not self.robot.move_to(x, y, z, speed=speed, wait=False):
+        if not self.robot.move_to(x, y, z, roll=roll, pitch=pitch, yaw=yaw, speed=speed, wait=False):
             return False
 
         # Poll until the trajectory finishes; pause/resume around any hand event.
@@ -166,11 +164,26 @@ class Lite6FSM:
         return True
 
     # -------------------------------------------------------------------------
-    # Camera helper
+    # Camera helpers (single camera; "top-down" = arm parked at TOP_VIEW_POSE)
     # -------------------------------------------------------------------------
 
+    def _goto_top_view(self) -> bool:
+        """
+        Park the arm at the fixed TOP_VIEW_POSE so the wrist camera sees the whole
+        workspace. The homography matrix is only valid from this pose, so SCANNING's
+        pixel→robot mapping requires we are here first.
+        """
+        return self._safe_move(
+            TOP_VIEW_POSE[0], TOP_VIEW_POSE[1], TOP_VIEW_POSE[2],
+            roll=TOP_VIEW_POSE[3], pitch=TOP_VIEW_POSE[4], yaw=TOP_VIEW_POSE[5],
+            speed=DEFAULT_SPEED,
+        )
+
     def _read_top_rgb(self):
-        ret, frame = read_fresh(self.cap_top)
+        """Move to TOP_VIEW_POSE, then read the (single) camera as the top-down view."""
+        if not self._goto_top_view():
+            return None
+        ret, frame = read_fresh(self.cap)
         if not ret:
             return None
         if self.safety_monitor:
@@ -178,7 +191,8 @@ class Lite6FSM:
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     def _read_wrist_rgb(self):
-        ret, frame = read_fresh(self.cap_wrist)
+        """Read the camera in place (close-up wrist view, e.g. for grasp confirmation)."""
+        ret, frame = read_fresh(self.cap)
         if not ret:
             return None
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -265,7 +279,7 @@ class Lite6FSM:
         print("\n─── [FSM: FINE_GRASP] Visual servoing + grasp ───────────────")
 
         locked = visual_servo_to_center(
-            cap_wrist=self.cap_wrist,
+            cap=self.cap,
             robot=self.robot,
             target_object=self.target_object,
             timeout=self.vla_timeout,

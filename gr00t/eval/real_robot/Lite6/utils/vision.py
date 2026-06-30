@@ -289,7 +289,7 @@ def _clamp(value: float, limit: float) -> float:
 
 
 def visual_servo_to_center(
-    cap_wrist,
+    cap,
     robot,
     target_object: str,
     timeout: float = 15.0,
@@ -329,7 +329,7 @@ def visual_servo_to_center(
             print("[Vision] Arm in error state during servoing — aborting.")
             return False
 
-        ret, frame_bgr = read_fresh(cap_wrist)
+        ret, frame_bgr = read_fresh(cap)
         if not ret:
             time.sleep(0.033)
             continue
@@ -344,7 +344,7 @@ def visual_servo_to_center(
                 robot.pause()
                 while safety_monitor.is_hand_present():
                     time.sleep(0.05)
-                    r2, f2 = read_fresh(cap_wrist)
+                    r2, f2 = read_fresh(cap)
                     if r2:
                         safety_monitor.update_frame(cv2.cvtColor(f2, cv2.COLOR_BGR2RGB))
                 robot.resume()

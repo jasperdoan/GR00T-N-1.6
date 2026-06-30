@@ -11,8 +11,8 @@ import cv2
 
 from utils.constants import (
     DEFAULT_IP,
-    TOP_DOWN_CAM_IDX, WRIST_CAM_IDX,
-    HOME_POSE,
+    WRIST_CAM_IDX,
+    HOME_POSE, TOP_VIEW_POSE,
     ALL_ZONES_DICT,
     OUTPUT_DIR_EVAL,
 )
@@ -23,8 +23,10 @@ from utils.robot   import Lite6Controller
 from utils.fsm     import Lite6FSM, FSMState
 
 
-def _snapshot(cap_top, filename, target_object):
-    ret, frame = read_fresh(cap_top)
+def _top_view_snapshot(robot, cap, filename, target_object):
+    """Park at TOP_VIEW_POSE (the single camera's top-down view), then snapshot."""
+    robot.move_to(*TOP_VIEW_POSE)
+    ret, frame = read_fresh(cap)
     if ret:
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         save_workspace_snapshot(frame_rgb, filename, target_object,
@@ -59,12 +61,11 @@ def main():
     print(f"[EVAL] Source zone   : {source_zone}")
     print(f"[EVAL] Target zone   : {target_zone}\n")
 
-    cap_top = cap_wrist = None
+    cap = None
     robot = safety_monitor = None
     try:
-        # Fail fast if a camera index is wrong, before enabling the arm.
-        cap_top   = open_camera(TOP_DOWN_CAM_IDX, "top-down camera")
-        cap_wrist = open_camera(WRIST_CAM_IDX, "wrist camera")
+        # Single physical camera (wrist), reused for the top-down view at TOP_VIEW_POSE.
+        cap = open_camera(WRIST_CAM_IDX, "wrist camera")
 
         robot = Lite6Controller(args.ip)
         robot.connect()                       # raises on failure — no blind runs
@@ -73,10 +74,10 @@ def main():
         robot.move_to(*HOME_POSE[:3])
         time.sleep(0.5)
 
-        _snapshot(cap_top, "snapshot_eval_front_before.jpg", target_object)
+        _top_view_snapshot(robot, cap, "snapshot_eval_front_before.jpg", target_object)
 
         fsm = Lite6FSM(
-            robot=robot, cap_top=cap_top, cap_wrist=cap_wrist,
+            robot=robot, cap=cap,
             task_type=task_type, target_object=target_object,
             source_zone=source_zone, target_zone=target_zone,
             vla_timeout=args.timeout, max_retries=args.retries,
@@ -84,9 +85,9 @@ def main():
         )
         final_state = fsm.run()
 
+        _top_view_snapshot(robot, cap, "snapshot_eval_front_after.jpg", target_object)
         robot.move_to(*HOME_POSE[:3])
         time.sleep(1.0)
-        _snapshot(cap_top, "snapshot_eval_front_after.jpg", target_object)
 
         if final_state == FSMState.DONE:
             print("\n[EVAL] COMPLETE — task succeeded.")
@@ -107,10 +108,8 @@ def main():
             except Exception:
                 pass
             robot.disconnect()
-        if cap_top is not None:
-            cap_top.release()
-        if cap_wrist is not None:
-            cap_wrist.release()
+        if cap is not None:
+            cap.release()
         clear_in_use()
         print("[EVAL] Shutdown complete.")
 
