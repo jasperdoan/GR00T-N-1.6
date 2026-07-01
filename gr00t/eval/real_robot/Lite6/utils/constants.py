@@ -10,7 +10,7 @@ STOP_FLAG_PATH  = "/tmp/stop_lite6.flag"
 
 # --- FILE PATHS ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MATRIX_PATH = os.path.join(BASE_DIR, "homography_matrix.npy")
+MATRIX_PATH = os.path.join(BASE_DIR, "data", "homography_matrix.npy")
 # Separate output dirs so eval's before/after snapshots don't land in the auto dir.
 OUTPUT_DIR_EVAL = "/workspaces/data/outputs/GR00T-N-1.6/lite6_eval"
 OUTPUT_DIR_AUTO = "/workspaces/data/outputs/GR00T-N-1.6/lite6_auto"

@@ -32,7 +32,7 @@ import os
 # ============================================================================
 
 MATRIX_FILENAME = "homography_matrix.npy"
-IMAGE_PATH = os.path.expanduser("~/Downloads/captured_image_custom_zed.jpg")
+IMAGE_PATH = os.path.expanduser("~/Downloads/captured_image.jpg")
 
 # Global variables for the OpenCV mouse callback
 clicked_points = []
