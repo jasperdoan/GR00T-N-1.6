@@ -75,8 +75,11 @@ ALL_ZONES_DICT = {
 KNOWN_OBJECTS = ["red cube", "blue cube", "yellow cube", "green cube"]
 
 # HSV Color Ranges (Lower Bound, Upper Bound)
+# Red's V floor is 60 (not 100): during the final grasp approach the gripper
+# casts a shadow on the cube and V drops — a V>=100 floor made the cube vanish
+# from detection precisely at the grasp pose.
 COLOR_RANGES = {
-    "red":    [((0, 100, 100), (10, 255, 255)), ((160, 100, 100), (180, 255, 255))], 
+    "red":    [((0, 100, 60), (10, 255, 255)), ((160, 100, 60), (180, 255, 255))],
     "blue":   [((100, 150, 50), (140, 255, 255))],
     "yellow": [((20, 100, 100), (30, 255, 255))],
     "green":  [((40, 50, 50), (90, 255, 255))],
@@ -88,10 +91,21 @@ COLOR_RANGES = {
 # calibration pose and the hover pose, so H's direction is always correct and
 # only its scale is off (camera is closer at hover -> H overestimates mm/px by
 # roughly the height ratio). SERVO_GAIN damps that overestimate.
-SERVO_GAIN = 0.6              # fraction of the homography-mapped error per step
+# Steps are error-proportional (gradient-descent-like): ~MAX_SERVO_STEP_MM when
+# far, ~1 mm near the target.
+# GAIN MEASURED FROM HARDWARE (check_in log 2026-07-01): a (-7.3, -8.0) mm step
+# changed the pixel error by (+29, +42) px → true scale at hover ≈ 0.175 mm/px,
+# while H predicts ≈ 0.39 mm/px — a 2.2x overestimate. Effective per-step
+# fraction = SERVO_GAIN × 2.2, so 0.22 here ≈ 0.5 real (stable, no overshoot).
+SERVO_GAIN = 0.22             # fraction of the homography-mapped error per step
 MAX_SERVO_STEP_MM = 8.0       # clamp per-iteration delta so a big initial error
                               # can't command an overshoot at FINE_ADJUST_SPEED
 SERVO_DEADBAND_PX = 3         # ignore sub-pixel jitter below this error
+
+# Settle time after each servo nudge before reading the camera. The MJPEG
+# stream has encode/transmit latency; without this, each step is computed from
+# a slightly PRE-move frame, which systematically overshoots.
+SERVO_SETTLE_S = 0.15
 
 # --- Move completion (pose convergence) ---
 # _safe_move issues non-blocking moves and detects completion by polling the
@@ -106,13 +120,27 @@ MOVE_TIMEOUT_S = 30.0   # give up (and fail the move) after this long
 # with the gripper hovering over the object at yaw=0:
 #   (627, 591, 162, 128), (609, 578, 130, 126), (618, 582, 150, 133)
 # ROI = union of the samples (609, 578, 180, 146) + 15 px margin per side.
-# The servo drives the blob centroid toward the ROI center and accepts only when
-# the blob's bounding box is FULLY inside this ROI.
+# LOCK criterion: the blob's bounding box must sit ENTIRELY inside this ROI.
+# (A centroid-at-center lock proved unreachable on hardware: the ROI sits at
+# the frame's bottom edge, and the cube becomes undetectable — edge clipping +
+# gripper shadow — precisely at the exact-center pose. Containment slop is
+# ±25 px ≈ ±4.4 mm at the measured 0.175 mm/px hover scale: fine for the jaws.)
 GRIPPER_ROI = (594, 563, 210, 176)   # (x, y, w, h) in wrist-cam pixels
 
 # Consecutive frames the blob must stay fully inside GRIPPER_ROI to lock the
 # servo (HSV mask edges flicker ~1-2 px; a single strict frame would chatter).
 SERVO_CONFIRM_FRAMES = 3
+
+# --- Lost-target spiral search (fine servoing) ---
+# If the blob is not visible in the wrist camera at hover (approach error of a
+# few cm is enough given the offset mount), the servo walks the arm in an
+# expanding square spiral around the approach point until the blob re-enters
+# the frame; normal servoing then resumes. Exhausting the budget aborts early
+# so the FSM's retry path (re-scan from top view) runs instead of idling.
+SEARCH_START_DELAY_S = 1.0   # blob must be unseen this long before searching
+                             # (ignores single-frame detection flicker)
+SEARCH_STEP_MM       = 7.5  # spiral leg increment per nudge
+SEARCH_MAX_STEPS     = 24    # nudge budget before giving up (covers ~±80 mm)
 
 # --- Yaw alignment (grasping rotated objects) ---
 # The object's in-image angle (cv2.minAreaRect at the hover pose) is mapped to a
@@ -123,7 +151,8 @@ CAMERA_YAW_SIGN    = 1.0    # flip to -1.0 if the gripper rotates the wrong way
 CAMERA_YAW_OFFSET  = 0.0    # fixed mount rotation (deg) between image axes and jaws
 
 # --- FSM retry / timeout defaults ---
-VLA_TIMEOUT  = 15.0   # seconds for the visual-servo lock attempt
+VLA_TIMEOUT  = 20.0   # seconds for the visual-servo lock attempt (tight centroid
+                      # lock + per-step settle needs a bit more than the old 15)
 MAX_RETRIES  = 2
 
 # --- HSV object detection (top-down) ---

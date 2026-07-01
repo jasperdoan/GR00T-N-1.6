@@ -15,6 +15,7 @@ from utils.constants import (
     HOME_POSE, TOP_VIEW_POSE,
     ALL_ZONES_DICT,
     OUTPUT_DIR_EVAL,
+    VLA_TIMEOUT,
 )
 from utils.system  import setup_signal_handlers, clear_stop_flag, set_in_use, clear_in_use, is_stop_requested
 from utils.nlp     import parse_instruction
@@ -40,7 +41,7 @@ def main():
     parser.add_argument("--ip",        type=str,   default=DEFAULT_IP)
     parser.add_argument("--camera",    type=str,   default=None,
                         help="Camera source override: device index (e.g. 0) or stream URL")
-    parser.add_argument("--timeout",   type=float, default=15.0, help="Visual servoing timeout (s)")
+    parser.add_argument("--timeout",   type=float, default=VLA_TIMEOUT, help="Visual servoing timeout (s)")
     parser.add_argument("--retries",   type=int,   default=2,    help="Max retries on failure")
     parser.add_argument("--no-safety", action="store_true",      help="Disable hand detection safety")
     args = parser.parse_args()

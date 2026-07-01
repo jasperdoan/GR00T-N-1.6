@@ -20,6 +20,7 @@ from utils.constants import (
     ALL_ZONES_DICT,
     OUTPUT_DIR_AUTO,
     SCAN_INTERVAL,
+    VLA_TIMEOUT,
 )
 from utils.system  import setup_signal_handlers, clear_stop_flag, set_in_use, clear_in_use, is_stop_requested
 from utils.vision  import SafetyMonitor, check_color_presence, save_workspace_snapshot, open_camera, read_fresh
@@ -52,7 +53,7 @@ def main():
     parser.add_argument("--ip",        type=str,   default=DEFAULT_IP)
     parser.add_argument("--camera",    type=str,   default=None,
                         help="Camera source override: device index (e.g. 0) or stream URL")
-    parser.add_argument("--timeout",   type=float, default=15.0)
+    parser.add_argument("--timeout",   type=float, default=VLA_TIMEOUT)
     parser.add_argument("--retries",   type=int,   default=2)
     parser.add_argument("--no-safety", action="store_true")
     args = parser.parse_args()

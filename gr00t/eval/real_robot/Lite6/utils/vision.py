@@ -23,6 +23,10 @@ from utils.constants import (
     SERVO_DEADBAND_PX,
     GRIPPER_ROI,
     SERVO_CONFIRM_FRAMES,
+    SERVO_SETTLE_S,
+    SEARCH_START_DELAY_S,
+    SEARCH_STEP_MM,
+    SEARCH_MAX_STEPS,
     FINE_ADJUST_SPEED,
     MATRIX_PATH,
     MIN_BLOB_AREA_PX,
@@ -385,6 +389,27 @@ def _clamp(value: float, limit: float) -> float:
     return max(-limit, min(limit, value))
 
 
+def _spiral_offsets(step_mm: float):
+    """
+    Infinite generator of cumulative (dx, dy) offsets tracing an expanding
+    square spiral: legs of 1,1,2,2,3,3,... steps in directions +X, +Y, -X, -Y.
+    Used to sweep the camera around the approach point when the target is lost.
+    """
+    x = y = 0.0
+    dirs = [(1, 0), (0, 1), (-1, 0), (0, -1)]
+    d = 0
+    run = 1
+    while True:
+        for _ in range(2):
+            ddx, ddy = dirs[d]
+            for _ in range(run):
+                x += ddx * step_mm
+                y += ddy * step_mm
+                yield x, y
+            d = (d + 1) % 4
+        run += 1
+
+
 def visual_servo_to_grasp(
     cap,
     robot,
@@ -405,9 +430,17 @@ def visual_servo_to_grasp(
             so H's DIRECTION is always right — only its scale is off (camera is
             closer → H overestimates mm/px by ~the height ratio), which the
             gain + step clamp absorb. No hand-tuned axis signs.
-    Accept: only when the blob's bounding box sits FULLY inside GRIPPER_ROI for
-            SERVO_CONFIRM_FRAMES consecutive frames (the arm holds still during
-            confirmation, so mask flicker can't fake a lock).
+    Accept: when the blob's bounding box sits ENTIRELY inside GRIPPER_ROI for
+            SERVO_CONFIRM_FRAMES consecutive frames while the arm stands still.
+            (Centroid-at-center proved unreachable on hardware: the ROI sits at
+            the frame's bottom edge and detection dies — clipping + gripper
+            shadow — at the exact-center pose. Containment slop is ~±4 mm at
+            the measured hover scale: within jaw tolerance.)
+
+    Lost target: first RETURN to the arm position where the blob was last
+            detected (losses cluster at the final-approach frontier; backing
+            straight off is the correct undo). Only if it's still invisible
+            there does the expanding spiral search start.
 
     Returns (locked, angle_deg):
       - locked: True once the containment criterion holds.
@@ -428,6 +461,19 @@ def visual_servo_to_grasp(
     start_time = time.time()
     confirm_count = 0
     last_angle = None
+
+    # Lost-target recovery state
+    last_seen = time.time()
+    last_seen_pos = None       # arm position at the most recent detection
+    returned_to_seen = False   # tried the return-to-last-seen undo this episode?
+    loss_backoff = 1.0         # step-size annealing: halved after each loss
+                               # episode so a step can't repeatedly overshoot
+                               # into the detection dead-zone (gradient-descent
+                               # style learning-rate backoff)
+    search_center = None
+    spiral_iter = None
+    search_steps = 0
+    roi_hint_shown = False
 
     print(f"[Vision] Visual servoing '{target_object}' into gripper ROI {GRIPPER_ROI}...")
 
@@ -471,27 +517,103 @@ def visual_servo_to_grasp(
         blob = find_object_blob(frame_rgb, color_name)
         if blob is None:
             confirm_count = 0
-            time.sleep(0.033)
-            continue
+
+            # Brief grace window: don't launch a search over one flickered frame.
+            if time.time() - last_seen < SEARCH_START_DELAY_S:
+                time.sleep(0.033)
+                continue
+
+            # --- First recovery: undo the last approach. Losses cluster at the
+            # final-approach frontier (frame-edge clipping / gripper shadow), and
+            # a spiral that steps away in a fixed +X/+Y direction just cancels
+            # the servo's progress in a limit cycle. Returning to the exact spot
+            # where the blob was last visible breaks that cycle. ---
+            if last_seen_pos is not None and not returned_to_seen:
+                returned_to_seen = True
+                loss_backoff = max(0.125, loss_backoff * 0.5)
+                print(f"[Vision] Target lost — returning to last-seen position "
+                      f"({last_seen_pos[0]:.1f}, {last_seen_pos[1]:.1f}) "
+                      f"[step backoff → {loss_backoff:.3f}]...")
+                if not robot.move_to(last_seen_pos[0], last_seen_pos[1], last_seen_pos[2],
+                                     speed=FINE_ADJUST_SPEED, wait=True):
+                    print("[Vision] Return move failed (rejected/faulted) — aborting.")
+                    return False, None
+                time.sleep(SERVO_SETTLE_S)
+                continue   # re-read; blob should be visible here again
+
+            # --- Second recovery: spiral search sweeping the camera around the
+            # last position until the blob re-enters the frame. ---
+            if search_center is None:
+                pos0 = robot.get_current_position()
+                if pos0 is None:
+                    time.sleep(0.033)
+                    continue
+                search_center = (pos0[0], pos0[1], pos0[2])
+                spiral_iter = _spiral_offsets(SEARCH_STEP_MM)
+                search_steps = 0
+                print(f"[Vision] Target lost — spiral search around "
+                      f"({search_center[0]:.1f}, {search_center[1]:.1f})...")
+
+            moved = False
+            while search_steps < SEARCH_MAX_STEPS:
+                search_steps += 1
+                off_x, off_y = next(spiral_iter)
+                tx = search_center[0] + off_x
+                ty = search_center[1] + off_y
+                tz = search_center[2]
+                if not robot.in_workspace(tx, ty, tz):
+                    continue   # unreachable spiral point; budget still consumed
+                print(f"[Vision] Spiral search step {search_steps}/{SEARCH_MAX_STEPS} "
+                      f"→ ({tx:.1f}, {ty:.1f})")
+                if not robot.move_to(tx, ty, tz, speed=FINE_ADJUST_SPEED, wait=True):
+                    print("[Vision] Search nudge failed (rejected/faulted) — aborting.")
+                    return False, None
+                moved = True
+                time.sleep(SERVO_SETTLE_S)   # post-move frame, not a stale one
+                # Search has its own budget; don't let it eat the servo timeout.
+                start_time = time.time()
+                break
+
+            if not moved:
+                print("[Vision] Target lost — spiral search exhausted. Aborting for re-scan.")
+                return False, None
+            continue   # loop re-reads the camera and re-detects after the nudge
 
         obj_cx, obj_cy, bbox, angle = blob
+        last_seen = time.time()
+        last_seen_pos = robot.get_current_position() or last_seen_pos
+        if search_center is not None or returned_to_seen:
+            print("[Vision] Target reacquired — resuming servoing.")
+        returned_to_seen = False
+        search_center = None
+        spiral_iter = None
+        search_steps = 0
 
-        # --- Acceptance: strict containment, held for N consecutive frames ---
+        err_x = obj_cx - aim_x
+        err_y = obj_cy - aim_y
+
+        # --- Acceptance: the blob's bounding box ENTIRELY inside GRIPPER_ROI,
+        # held for N consecutive frames while the arm stands still. ---
         if blob_inside_roi(bbox, GRIPPER_ROI):
             confirm_count += 1
             last_angle = angle
             if confirm_count >= SERVO_CONFIRM_FRAMES:
-                print(f"[Vision] Blob {bbox} inside gripper ROI for "
-                      f"{confirm_count} frames. Locked (angle={last_angle:.1f}°).")
+                print(f"[Vision] Blob {bbox} fully inside ROI for {confirm_count} frames "
+                      f"(centroid {err_x:+d},{err_y:+d} px off center). "
+                      f"Locked (angle={last_angle:.1f}°).")
                 return True, last_angle
-            time.sleep(0.033)   # hold still; just re-read to confirm stability
+            time.sleep(SERVO_SETTLE_S)   # hold still; re-read to confirm stability
             continue
         confirm_count = 0
 
-        # --- Drive: centroid error toward the ROI center ---
-        err_x = obj_cx - aim_x
-        err_y = obj_cy - aim_y
+        # Near-centered but never contained → the ROI is too small for the
+        # object's apparent size; servoing can't fix that. Name the knob to turn.
+        if abs(err_x) <= 8 and abs(err_y) <= 8 and not roi_hint_shown:
+            print(f"[Vision] Hint: centroid near center but bbox {bbox} not contained in "
+                  f"GRIPPER_ROI {GRIPPER_ROI} — the ROI may be too tight for this object.")
+            roi_hint_shown = True
 
+        # --- Drive: centroid error toward the ROI center ---
         cmd_x = aim_x if abs(err_x) < SERVO_DEADBAND_PX else obj_cx
         cmd_y = aim_y if abs(err_y) < SERVO_DEADBAND_PX else obj_cy
 
@@ -502,16 +624,22 @@ def visual_servo_to_grasp(
 
         # Homography-mapped P-step: the displacement that puts the object at
         # the aim pixel is H(p_obj) − H(p_aim) (a camera translating by Δ
-        # shifts image content by −Δ). Damped by SERVO_GAIN, bounded by clamp.
+        # shifts image content by −Δ). Damped by SERVO_GAIN (annealed by the
+        # loss backoff), bounded by the step clamp.
         obj_robot = pixel_to_robot(cmd_x, cmd_y, H)
-        dx = _clamp(SERVO_GAIN * (obj_robot[0] - aim_robot[0]), MAX_SERVO_STEP_MM)
-        dy = _clamp(SERVO_GAIN * (obj_robot[1] - aim_robot[1]), MAX_SERVO_STEP_MM)
+        gain = SERVO_GAIN * loss_backoff
+        dx = _clamp(gain * (obj_robot[0] - aim_robot[0]), MAX_SERVO_STEP_MM)
+        dy = _clamp(gain * (obj_robot[1] - aim_robot[1]), MAX_SERVO_STEP_MM)
 
         print(f"[Vision] err=({err_x:+d},{err_y:+d}) px → step=({dx:+.1f},{dy:+.1f}) mm")
         if not robot.move_to(pos[0] + dx, pos[1] + dy, pos[2],
                              speed=FINE_ADJUST_SPEED, wait=True):
             print("[Vision] Servo nudge failed (rejected/faulted) — aborting.")
             return False, None
+
+        # Let the stream catch up so the next step is computed from a
+        # genuinely post-move frame (MJPEG has encode/transmit latency).
+        time.sleep(SERVO_SETTLE_S)
 
     return False, None
 
