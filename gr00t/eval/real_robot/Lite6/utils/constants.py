@@ -81,10 +81,23 @@ COLOR_RANGES = {
 }
 
 # --- Visual Servoing (Image-Based Visual Servoing P-controller) ---
-VS_KP = 0.08                  # proportional gain: pixel error -> mm delta
+# The pixel error is mapped to a robot-frame delta THROUGH THE HOMOGRAPHY
+# (H(p_obj) - H(p_aim)): the camera's orientation never changes between the
+# calibration pose and the hover pose, so H's direction is always correct and
+# only its scale is off (camera is closer at hover -> H overestimates mm/px by
+# roughly the height ratio). SERVO_GAIN damps that overestimate.
+SERVO_GAIN = 0.6              # fraction of the homography-mapped error per step
 MAX_SERVO_STEP_MM = 8.0       # clamp per-iteration delta so a big initial error
                               # can't command an overshoot at FINE_ADJUST_SPEED
 SERVO_DEADBAND_PX = 3         # ignore sub-pixel jitter below this error
+
+# --- Move completion (pose convergence) ---
+# _safe_move issues non-blocking moves and detects completion by polling the
+# actual pose — get_is_moving() lags after a non-blocking command and once let
+# the FSM race ahead while the arm was still at TOP_VIEW_POSE.
+POSE_TOL_MM    = 2.0    # XYZ distance to target to count as "arrived"
+POSE_TOL_DEG   = 2.0    # yaw distance (covers yaw-only alignment moves)
+MOVE_TIMEOUT_S = 30.0   # give up (and fail the move) after this long
 
 # Gripper ROI: where the object appears in the wrist camera when the gripper is
 # correctly over it (camera is NOT coaxial with the TCP). Measured from 3 samples

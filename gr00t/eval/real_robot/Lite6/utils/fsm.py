@@ -40,6 +40,7 @@ from utils.constants import (
     SAFE_Z, GRASP_Z,
     DEFAULT_SPEED, FINE_ADJUST_SPEED,
     YAW_ALIGN_ENABLED, CAMERA_YAW_SIGN, CAMERA_YAW_OFFSET,
+    POSE_TOL_MM, POSE_TOL_DEG, MOVE_TIMEOUT_S,
 )
 from utils.vision import (
     SafetyMonitor,
@@ -135,7 +136,15 @@ class Lite6FSM:
     # -------------------------------------------------------------------------
     # Safety-aware move — issues a non-blocking move, then polls so a hand
     # entering mid-trajectory pauses the arm immediately (not at move-end).
-    # Returns True on success, False on rejection/fault/abort.
+    #
+    # Completion is detected by POSE CONVERGENCE (actual position within
+    # POSE_TOL of the target), NOT get_is_moving(): the controller lags a few
+    # tens of ms before reporting motion after a non-blocking command, which
+    # once let the FSM race into FINE_GRASP while the arm was still parked at
+    # TOP_VIEW_POSE. If the arm hasn't started moving yet, it simply isn't at
+    # the target — no race is possible.
+    #
+    # Returns True on success, False on rejection/fault/abort/timeout.
     # -------------------------------------------------------------------------
 
     def _safe_move(self, x, y, z, roll=-180.0, pitch=0.0, yaw=0.0, speed=DEFAULT_SPEED) -> bool:
@@ -151,26 +160,49 @@ class Lite6FSM:
         if not self.robot.move_to(x, y, z, roll=roll, pitch=pitch, yaw=yaw, speed=speed, wait=False):
             return False
 
-        # Poll until the trajectory finishes; pause/resume around any hand event.
-        while self.robot.is_moving() or (self.safety_monitor and self.safety_monitor.is_hand_present()):
+        deadline = time.time() + MOVE_TIMEOUT_S
+        last_frame_feed = 0.0
+        while time.time() < deadline:
             if self.should_stop_cb and self.should_stop_cb():
                 self.robot.pause()
                 return False
+
+            # Keep the hand detector fed during travel (~10 Hz) — without this
+            # the shared flag can never trip mid-move.
+            now = time.time()
+            if self.safety_monitor and now - last_frame_feed > 0.1:
+                last_frame_feed = now
+                ret, frame = read_fresh(self.cap)
+                if ret:
+                    self.safety_monitor.update_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
             if self.safety_monitor and self.safety_monitor.is_hand_present():
                 print("[SAFETY] Hand detected mid-move — pausing arm...")
                 self.robot.pause()
                 while self.safety_monitor.is_hand_present():
                     time.sleep(0.05)
+                    ret, frame = read_fresh(self.cap)
+                    if ret:
+                        self.safety_monitor.update_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                 print("[SAFETY] Hand removed — resuming.")
                 self.robot.resume()
-                time.sleep(0.1)   # let motion restart before re-polling is_moving()
+                deadline = time.time() + MOVE_TIMEOUT_S   # don't count the pause
+
+            if self.robot.has_error():
+                print("[FSM] Arm entered error state mid-move — clearing.")
+                self.robot.clear_errors()
+                return False
+
+            pos = self.robot.get_current_position()
+            if pos is not None:
+                dist = ((pos[0] - x) ** 2 + (pos[1] - y) ** 2 + (pos[2] - z) ** 2) ** 0.5
+                if dist <= POSE_TOL_MM and abs(pos[5] - yaw) <= POSE_TOL_DEG:
+                    return True
+
             time.sleep(0.02)
 
-        if self.robot.has_error():
-            print("[FSM] Arm in error state after move — clearing.")
-            self.robot.clear_errors()
-            return False
-        return True
+        print(f"[FSM] Move to ({x:.1f}, {y:.1f}, {z:.1f}) did not converge within {MOVE_TIMEOUT_S:.0f}s.")
+        return False
 
     # -------------------------------------------------------------------------
     # Camera helpers (single camera; "top-down" = arm parked at TOP_VIEW_POSE)
@@ -284,6 +316,7 @@ class Lite6FSM:
             cap=self.cap,
             robot=self.robot,
             target_object=self.target_object,
+            H=self.H,
             timeout=self.vla_timeout,
             safety_monitor=self.safety_monitor,
             should_stop_cb=self.should_stop_cb,

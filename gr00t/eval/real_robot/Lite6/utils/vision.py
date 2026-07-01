@@ -18,7 +18,7 @@ import numpy as np
 
 from utils.constants import (
     COLOR_RANGES,
-    VS_KP,
+    SERVO_GAIN,
     MAX_SERVO_STEP_MM,
     SERVO_DEADBAND_PX,
     GRIPPER_ROI,
@@ -389,6 +389,7 @@ def visual_servo_to_grasp(
     cap,
     robot,
     target_object: str,
+    H,
     timeout: float = 15.0,
     safety_monitor: Optional[SafetyMonitor] = None,
     should_stop_cb=None,
@@ -397,8 +398,13 @@ def visual_servo_to_grasp(
     IBVS proportional-control loop for the non-coaxial wrist camera.
 
     Drive:  nudge the arm in XY so the blob CENTROID moves toward the center of
-            GRIPPER_ROI (the data-measured region where the object appears when
-            the gripper is correctly over it).
+            GRIPPER_ROI. The pixel error is mapped to a robot-frame delta via
+            the HOMOGRAPHY: Δ = SERVO_GAIN · (H(p_obj) − H(p_aim)). H's absolute
+            mapping is only valid at TOP_VIEW_POSE, but the camera orientation
+            is identical at the hover pose (rigid mount, same roll/pitch/yaw),
+            so H's DIRECTION is always right — only its scale is off (camera is
+            closer → H overestimates mm/px by ~the height ratio), which the
+            gain + step clamp absorb. No hand-tuned axis signs.
     Accept: only when the blob's bounding box sits FULLY inside GRIPPER_ROI for
             SERVO_CONFIRM_FRAMES consecutive frames (the arm holds still during
             confirmation, so mask flicker can't fake a lock).
@@ -409,10 +415,15 @@ def visual_servo_to_grasp(
         confirmation frame) so the caller can yaw-align the gripper without
         another camera read. None when not locked.
     """
+    if H is None:
+        print("[Vision] No homography — cannot map pixel error to robot frame.")
+        return False, None
+
     color_name = target_object.split()[0].lower()
     rx, ry, rw, rh = GRIPPER_ROI
     aim_x = rx + rw // 2
     aim_y = ry + rh // 2
+    aim_robot = pixel_to_robot(aim_x, aim_y, H)
 
     start_time = time.time()
     confirm_count = 0
@@ -481,19 +492,22 @@ def visual_servo_to_grasp(
         err_x = obj_cx - aim_x
         err_y = obj_cy - aim_y
 
-        cmd_err_x = 0 if abs(err_x) < SERVO_DEADBAND_PX else err_x
-        cmd_err_y = 0 if abs(err_y) < SERVO_DEADBAND_PX else err_y
+        cmd_x = aim_x if abs(err_x) < SERVO_DEADBAND_PX else obj_cx
+        cmd_y = aim_y if abs(err_y) < SERVO_DEADBAND_PX else obj_cy
 
         pos = robot.get_current_position()
         if pos is None:
             time.sleep(0.033)
             continue
 
-        # P-control with a per-step clamp. Sign mapping (camera px -> robot mm)
-        # depends on the wrist-camera orientation; flip signs here after a bench test.
-        dx = _clamp(VS_KP * cmd_err_x, MAX_SERVO_STEP_MM)
-        dy = _clamp(VS_KP * cmd_err_y, MAX_SERVO_STEP_MM)
+        # Homography-mapped P-step: the displacement that puts the object at
+        # the aim pixel is H(p_obj) − H(p_aim) (a camera translating by Δ
+        # shifts image content by −Δ). Damped by SERVO_GAIN, bounded by clamp.
+        obj_robot = pixel_to_robot(cmd_x, cmd_y, H)
+        dx = _clamp(SERVO_GAIN * (obj_robot[0] - aim_robot[0]), MAX_SERVO_STEP_MM)
+        dy = _clamp(SERVO_GAIN * (obj_robot[1] - aim_robot[1]), MAX_SERVO_STEP_MM)
 
+        print(f"[Vision] err=({err_x:+d},{err_y:+d}) px → step=({dx:+.1f},{dy:+.1f}) mm")
         if not robot.move_to(pos[0] + dx, pos[1] + dy, pos[2],
                              speed=FINE_ADJUST_SPEED, wait=True):
             print("[Vision] Servo nudge failed (rejected/faulted) — aborting.")

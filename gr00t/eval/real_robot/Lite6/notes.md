@@ -1,3 +1,4 @@
+For the future:
 
 Will be using Orbbec Gemini336 3D Camera. Maybe leverage pyorbbecsdk for all the 3D stuff like Depth Data estimation, depth pixels to the color pixels (e.g., finding the depth of a specific colored object). The lenses are physically offset from one another. The SDK performs the complex matrix math to warp and align the depth map to the color map, IR projector (the laser pattern that helps it see in the dark), adjust the depth sensing mode, or read the built-in IMU (gyroscope/accelerometer) data, etc... to this arm. Ask question if you are unsure. See where any of these could be used / applicable to our current task and application so that it is more accurate. Like one of them is Point Clouds: The SDK has built-in functions to instantly convert the depth frames into 3D X, Y, Z coordinates (Point Clouds). Which I think is super useful considering the fact we can merge this with the lite6 mm 3D set position system to know exactly where everything is!!!! Honestly I prefer it this way over what we have currently where it scans everything and knows wher everything is and where to go to grab the object for example.
 
@@ -75,6 +76,19 @@ change protocol identifier to 3
 [AUTO] Shutdown complete.
 ```
 
-First of all I updated 
+First of all I updated Z=150.0 to Z=200.0 since that was actually the Z I used to get the ROI. My mistake. After that fix, I ran the auto.py script and it was able to successfully servo globally but not locally.
 
-I noticed serveral problems that needs fixing. First, Visual servoing + grasp should be more accurate, right now it is moving out of place. So I expected 
+I noticed serveral problems that needs fixing. First, Visual servoing + grasp should be more accurate, right now it is moving out of place. So I expected (in the log example above)
+
+[Robot] Moving to X:-163.2 Y:-153.5 Z:150.0 (speed=200, wait=False)...
+[GLOBAL_APPROACH] Above (-163.2, -153.5) at Z=150.0.
+
+I should only traverse around X:-163.2 Y:-153.5 (ignore the 200, that now has been changed in constants.py). But instead it moves to 50s in x and low 5. The whole point was it being able to servo move little by little so the object sits within the frame. Actually I'm not sure about the implementation but I am not sure if you are using the homography matrix to convert this for the fine servoing. I don't think that will work since it is specifically for top view only for global servoing. I think we either need to do something else, like programically move it (say red cube needs to be in the center of frame, but is too low). Then move along x y until it does. Is there some algorithm that can do this? I think it is called visual servoing. I think we need to implement that for the fine servoing. The global servoing is working fine, but the fine servoing is not. You are the expert here, push back on me if there's something I am missing, or if there's a better solution.
+
+
+
+Soft Kill --> Should still continue its motion / return to home / init position
+
+Currently it works, visual servoing is accurate. But once it has lower, it needs to wait a moment (like 3 seconds - put in constants.py) to let the gripper close on it and grip it. Then at target zone, open gripper to release and go back home.
+
+Turn on safety mode. Detect hand then pauses, resume if out of frame.
