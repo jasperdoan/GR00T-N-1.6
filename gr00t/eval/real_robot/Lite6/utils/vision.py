@@ -19,16 +19,14 @@ import numpy as np
 from utils.constants import (
     COLOR_RANGES,
     VS_KP,
-    CENTER_TOLERANCE_PX,
     MAX_SERVO_STEP_MM,
     SERVO_DEADBAND_PX,
-    CAMERA_CENTER_OFFSET,
+    GRIPPER_ROI,
+    SERVO_CONFIRM_FRAMES,
     FINE_ADJUST_SPEED,
     MATRIX_PATH,
     MIN_BLOB_AREA_PX,
     FRONT_MIN_PRESENCE_PX,
-    WRIST_GRASP_ROI,
-    WRIST_GRASP_MIN_PX,
 )
 
 try:
@@ -232,6 +230,54 @@ def find_object_centroid(frame: np.ndarray, color_name: str) -> Optional[Tuple[i
     return cx, cy
 
 
+def find_object_blob(frame: np.ndarray, color_name: str):
+    """
+    Full blob detection for the servo/grasp phase. Returns
+        (cx, cy, (bx, by, bw, bh), angle_deg)
+    for the largest color blob, or None if not found.
+
+    angle_deg is the object's in-image rotation from cv2.minAreaRect, normalized
+    to [-45, 45) — a cube is 90°-symmetric, so this is always the SMALLEST wrist
+    rotation that aligns the jaws with the object's faces.
+    """
+    img_u8  = _ensure_uint8(frame)
+    img_bgr = cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR) if img_u8.shape[2] == 3 else img_u8
+    hsv     = _enhance_saturation(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV), factor=1.4)
+    mask    = _build_color_mask(hsv, color_name)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    largest = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(largest) < MIN_BLOB_AREA_PX:
+        return None
+
+    M = cv2.moments(largest)
+    if M["m00"] == 0:
+        return None
+    cx = int(M["m10"] / M["m00"])
+    cy = int(M["m01"] / M["m00"])
+
+    bbox = cv2.boundingRect(largest)
+
+    # minAreaRect angle conventions vary across OpenCV versions; fold everything
+    # into [-45, 45) using the cube's 90° symmetry.
+    (_, _), (_, _), raw_angle = cv2.minAreaRect(largest)
+    angle = raw_angle % 90.0
+    if angle >= 45.0:
+        angle -= 90.0
+
+    return cx, cy, bbox, angle
+
+
+def blob_inside_roi(bbox, roi) -> bool:
+    """True only if the blob's bounding box is FULLY inside the ROI (no pixel outside)."""
+    bx, by, bw, bh = bbox
+    rx, ry, rw, rh = roi
+    return bx >= rx and by >= ry and (bx + bw) <= (rx + rw) and (by + bh) <= (ry + rh)
+
+
 def check_color_presence(frame: np.ndarray, target_object: str, zone_roi=None) -> Tuple[bool, int]:
     """
     Check if target_object's color is present above FRONT_MIN_PRESENCE_PX.
@@ -256,30 +302,6 @@ def check_color_presence(frame: np.ndarray, target_object: str, zone_roi=None) -
     return px_count >= FRONT_MIN_PRESENCE_PX, px_count
 
 
-def confirm_grasp(wrist_frame: np.ndarray, target_object: str) -> Tuple[bool, int]:
-    """
-    Verify the object is actually in the gripper after a close, by masking the
-    target color inside the wrist-camera gripper ROI. This is the deterministic
-    IBVS analog of SO100's GraspDetector — a single color-mass check, not the
-    full optical-flow/history machinery (which was VLA-specific).
-    Returns (grasped, px_count).
-    """
-    color_name = target_object.split()[0].lower()
-    img_u8  = _ensure_uint8(wrist_frame)
-    img_bgr = cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR) if img_u8.shape[2] == 3 else img_u8
-
-    x, y, w, h = WRIST_GRASP_ROI
-    H_img, W_img = img_bgr.shape[:2]
-    x = max(0, min(x, W_img - 1)); y = max(0, min(y, H_img - 1))
-    w = max(1, min(w, W_img - x)); h = max(1, min(h, H_img - y))
-    roi = img_bgr[y:y + h, x:x + w]
-
-    hsv  = _enhance_saturation(cv2.cvtColor(roi, cv2.COLOR_BGR2HSV), factor=1.4)
-    mask = _build_color_mask(hsv, color_name)
-    px_count = int(np.sum(mask > 0))
-    return px_count >= WRIST_GRASP_MIN_PX, px_count
-
-
 # =============================================================================
 # Visual Servoing P-controller
 # =============================================================================
@@ -288,46 +310,53 @@ def _clamp(value: float, limit: float) -> float:
     return max(-limit, min(limit, value))
 
 
-def visual_servo_to_center(
+def visual_servo_to_grasp(
     cap,
     robot,
     target_object: str,
     timeout: float = 15.0,
     safety_monitor: Optional[SafetyMonitor] = None,
     should_stop_cb=None,
-) -> bool:
+) -> Tuple[bool, Optional[float]]:
     """
-    IBVS proportional-control loop. Reads the wrist camera and nudges the arm in
-    XY until the detected object centroid reaches the aim point — the frame
-    center plus CAMERA_CENTER_OFFSET (compensating for the non-coaxial mount).
+    IBVS proportional-control loop for the non-coaxial wrist camera.
 
-    Hardening over the naive version:
-      - aim point includes the hand-eye offset
-      - per-step delta is clamped (MAX_SERVO_STEP_MM) and dead-banded
-      - hand safety uses robot.pause()/resume() to halt an in-flight nudge
-      - every nudge checks move success and the arm's error state
-      - reads the freshest frame to avoid buffer-induced oscillation
+    Drive:  nudge the arm in XY so the blob CENTROID moves toward the center of
+            GRIPPER_ROI (the data-measured region where the object appears when
+            the gripper is correctly over it).
+    Accept: only when the blob's bounding box sits FULLY inside GRIPPER_ROI for
+            SERVO_CONFIRM_FRAMES consecutive frames (the arm holds still during
+            confirmation, so mask flicker can't fake a lock).
 
-    Returns True once centered, False on timeout / abort / arm fault.
+    Returns (locked, angle_deg):
+      - locked: True once the containment criterion holds.
+      - angle_deg: the object's in-image rotation ([-45, 45), from the LAST
+        confirmation frame) so the caller can yaw-align the gripper without
+        another camera read. None when not locked.
     """
     color_name = target_object.split()[0].lower()
-    off_x, off_y = CAMERA_CENTER_OFFSET
-    start_time = time.time()
+    rx, ry, rw, rh = GRIPPER_ROI
+    aim_x = rx + rw // 2
+    aim_y = ry + rh // 2
 
-    print(f"[Vision] Starting visual servoing for '{target_object}'...")
+    start_time = time.time()
+    confirm_count = 0
+    last_angle = None
+
+    print(f"[Vision] Visual servoing '{target_object}' into gripper ROI {GRIPPER_ROI}...")
 
     while True:
         if should_stop_cb and should_stop_cb():
             print("[Vision] Stop requested during visual servoing.")
-            return False
+            return False, None
 
         if time.time() - start_time > timeout:
             print("[Vision] Visual servoing TIMEOUT.")
-            return False
+            return False, None
 
         if robot.has_error():
             print("[Vision] Arm in error state during servoing — aborting.")
-            return False
+            return False, None
 
         ret, frame_bgr = read_fresh(cap)
         if not ret:
@@ -350,26 +379,33 @@ def visual_servo_to_center(
                 robot.resume()
                 print("[SAFETY] Hand removed — resuming servoing.")
                 start_time = time.time()   # don't penalise the pause against the timeout
+                confirm_count = 0
                 continue
 
-        h, w = frame_bgr.shape[:2]
-        aim_x = w // 2 + off_x
-        aim_y = h // 2 + off_y
-
-        centroid = find_object_centroid(frame_rgb, color_name)
-        if centroid is None:
+        blob = find_object_blob(frame_rgb, color_name)
+        if blob is None:
+            confirm_count = 0
             time.sleep(0.033)
             continue
 
-        obj_cx, obj_cy = centroid
+        obj_cx, obj_cy, bbox, angle = blob
+
+        # --- Acceptance: strict containment, held for N consecutive frames ---
+        if blob_inside_roi(bbox, GRIPPER_ROI):
+            confirm_count += 1
+            last_angle = angle
+            if confirm_count >= SERVO_CONFIRM_FRAMES:
+                print(f"[Vision] Blob {bbox} inside gripper ROI for "
+                      f"{confirm_count} frames. Locked (angle={last_angle:.1f}°).")
+                return True, last_angle
+            time.sleep(0.033)   # hold still; just re-read to confirm stability
+            continue
+        confirm_count = 0
+
+        # --- Drive: centroid error toward the ROI center ---
         err_x = obj_cx - aim_x
         err_y = obj_cy - aim_y
 
-        if abs(err_x) < CENTER_TOLERANCE_PX and abs(err_y) < CENTER_TOLERANCE_PX:
-            print(f"[Vision] Object centered (err=({err_x},{err_y})). Locked.")
-            return True
-
-        # Dead-band sub-pixel jitter so we don't chatter near the target.
         cmd_err_x = 0 if abs(err_x) < SERVO_DEADBAND_PX else err_x
         cmd_err_y = 0 if abs(err_y) < SERVO_DEADBAND_PX else err_y
 
@@ -386,9 +422,9 @@ def visual_servo_to_center(
         if not robot.move_to(pos[0] + dx, pos[1] + dy, pos[2],
                              speed=FINE_ADJUST_SPEED, wait=True):
             print("[Vision] Servo nudge failed (rejected/faulted) — aborting.")
-            return False
+            return False, None
 
-    return False
+    return False, None
 
 
 # =============================================================================

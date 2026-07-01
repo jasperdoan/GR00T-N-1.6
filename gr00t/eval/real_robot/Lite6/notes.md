@@ -4,5 +4,3 @@ Will be using Orbbec Gemini336 3D Camera. Maybe leverage pyorbbecsdk for all the
 
 
 http://0.0.0.0:9988/stream.mjpg
-
-

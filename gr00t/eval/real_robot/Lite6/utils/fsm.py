@@ -3,11 +3,11 @@ Lite6 Finite State Machine Controller
 
 States:
   PRE_CHECK      → verify target color is present in the SOURCE zone ROI
-  SCANNING       → top-down camera → homography → robot XY target
+  SCANNING       → top-view pose → homography → robot XY target
   GLOBAL_APPROACH→ move to (X, Y, SAFE_Z) above the object
-  FINE_GRASP     → wrist-cam visual servoing → descend → grasp → CONFIRM → lift
-  TRANSPORT      → move to target zone, re-confirm grasp, drop
-  RECOVERY       → grasp lost mid-air → release, re-home, retry
+  FINE_GRASP     → servo blob into GRIPPER_ROI → yaw-align → descend → grasp → lift
+  TRANSPORT      → move to target zone (yaw back to straight), drop
+  RECOVERY       → move fault mid-task → release, re-home, retry
   VERIFY         → confirm object landed in the TARGET zone ROI
   DONE / FAILED
 
@@ -15,9 +15,18 @@ Safety / robustness:
   - Hand freeze actually halts in-flight motion via robot.pause()/resume()
     (the blocking-move version could only react between moves).
   - Every move checks its return code; faults route to recovery/FAILED.
-  - Grasp is confirmed by the wrist camera before and after transport, so the
-    arm can't carry air and falsely report success.
   - Vision is zone-restricted, so PRE_CHECK/VERIFY mean what they say.
+  - No post-grasp camera check: the object is not visible in the wrist camera
+    once gripped (mount geometry), so we rely on the servo's strict ROI
+    containment + the Lite6's repeatability, and VERIFY catches a failed
+    pick because the object never shows up in the target zone.
+
+Grasp orientation:
+  The servo runs at yaw=0 (GRIPPER_ROI was measured at yaw=0). Once the blob
+  is contained, the object's in-image angle from that final frame drives a
+  pure yaw rotation about the TCP — which does NOT move the gripper off the
+  object — then the descent/grasp/lift carry that yaw. Transport commands
+  yaw=0, so the cube is straightened before the drop.
 """
 
 import time
@@ -30,6 +39,7 @@ from utils.constants import (
     ZONES, ZONE_PIXEL_ROI, HOME_POSE, TOP_VIEW_POSE,
     SAFE_Z, GRASP_Z,
     DEFAULT_SPEED, FINE_ADJUST_SPEED,
+    YAW_ALIGN_ENABLED, CAMERA_YAW_SIGN, CAMERA_YAW_OFFSET,
 )
 from utils.vision import (
     SafetyMonitor,
@@ -37,8 +47,7 @@ from utils.vision import (
     pixel_to_robot,
     find_object_centroid,
     check_color_presence,
-    confirm_grasp,
-    visual_servo_to_center,
+    visual_servo_to_grasp,
     read_fresh,
 )
 
@@ -190,13 +199,6 @@ class Lite6FSM:
             self.safety_monitor.update_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    def _read_wrist_rgb(self):
-        """Read the camera in place (close-up wrist view, e.g. for grasp confirmation)."""
-        ret, frame = read_fresh(self.cap)
-        if not ret:
-            return None
-        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
     # -------------------------------------------------------------------------
     # State handlers
     # -------------------------------------------------------------------------
@@ -278,7 +280,7 @@ class Lite6FSM:
     def _handle_fine_grasp(self):
         print("\n─── [FSM: FINE_GRASP] Visual servoing + grasp ───────────────")
 
-        locked = visual_servo_to_center(
+        locked, obj_angle = visual_servo_to_grasp(
             cap=self.cap,
             robot=self.robot,
             target_object=self.target_object,
@@ -300,8 +302,23 @@ class Lite6FSM:
             return
         grasp_x, grasp_y = pos[0], pos[1]
 
-        print(f"[FINE_GRASP] Descending to Z={GRASP_Z}...")
-        if not self._safe_move(grasp_x, grasp_y, GRASP_Z, speed=FINE_ADJUST_SPEED):
+        # Yaw-align the jaws to the object. A pure yaw rotation about the TCP
+        # keeps the gripper over the object (only the camera view moves, and we
+        # no longer need the camera from here on).
+        grasp_yaw = 0.0
+        if YAW_ALIGN_ENABLED and obj_angle is not None and abs(obj_angle) > 1.0:
+            grasp_yaw = CAMERA_YAW_SIGN * obj_angle + CAMERA_YAW_OFFSET
+            print(f"[FINE_GRASP] Object rotated {obj_angle:.1f}° — aligning gripper yaw to {grasp_yaw:.1f}°.")
+            if not self._safe_move(grasp_x, grasp_y, pos[2], yaw=grasp_yaw, speed=FINE_ADJUST_SPEED):
+                if self._fail_or_retry("Yaw alignment move failed"):
+                    self.state = FSMState.FAILED
+                else:
+                    self._safe_move(*HOME_POSE[:3])
+                    self.state = FSMState.SCANNING
+                return
+
+        print(f"[FINE_GRASP] Descending to Z={GRASP_Z} (yaw={grasp_yaw:.1f}°)...")
+        if not self._safe_move(grasp_x, grasp_y, GRASP_Z, yaw=grasp_yaw, speed=FINE_ADJUST_SPEED):
             if self._fail_or_retry("Descent to grasp failed"):
                 self.state = FSMState.FAILED
             else:
@@ -309,27 +326,13 @@ class Lite6FSM:
                 self.state = FSMState.SCANNING
             return
 
+        # No camera confirmation possible here — the object is not visible in
+        # the wrist camera once gripped. The strict ROI containment above plus
+        # the Lite6's repeatability carry the grasp; VERIFY catches a miss.
         self.robot.close_gripper()
 
-        # Confirm we actually grabbed it (vs closing on air).
-        wrist_rgb = self._read_wrist_rgb()
-        grasped, px = (False, 0)
-        if wrist_rgb is not None:
-            grasped, px = confirm_grasp(wrist_rgb, self.target_object)
-
-        if not grasped:
-            print(f"[FINE_GRASP] Grasp NOT confirmed ({px} px in gripper ROI). Releasing.")
-            self.robot.open_gripper()
-            self._safe_move(grasp_x, grasp_y, SAFE_Z, speed=FINE_ADJUST_SPEED)
-            if self._fail_or_retry("Empty grasp"):
-                self.state = FSMState.FAILED
-            else:
-                self._safe_move(*HOME_POSE[:3])
-                self.state = FSMState.SCANNING
-            return
-
-        print(f"[FINE_GRASP] Grasp confirmed ({px} px). Lifting to Z={SAFE_Z}.")
-        if not self._safe_move(grasp_x, grasp_y, SAFE_Z, speed=FINE_ADJUST_SPEED):
+        print(f"[FINE_GRASP] Lifting to Z={SAFE_Z} (keeping yaw until clear of table)...")
+        if not self._safe_move(grasp_x, grasp_y, SAFE_Z, yaw=grasp_yaw, speed=FINE_ADJUST_SPEED):
             self.state = FSMState.RECOVERY
             return
 
@@ -345,19 +348,12 @@ class Lite6FSM:
             return
         drop_x, drop_y = zone["x"], zone["y"]
 
+        # This move commands yaw=0 (the _safe_move default), so a cube grasped
+        # at an angle is rotated back to straight in mid-air before the drop.
         print(f"[TRANSPORT] Moving to {self.target_zone} ({drop_x}, {drop_y}) at Z={SAFE_Z}...")
         if not self._safe_move(drop_x, drop_y, SAFE_Z, speed=DEFAULT_SPEED):
             self.state = FSMState.RECOVERY
             return
-
-        # Re-confirm grasp before releasing — catches a cube dropped in transit.
-        wrist_rgb = self._read_wrist_rgb()
-        if wrist_rgb is not None:
-            still_held, px = confirm_grasp(wrist_rgb, self.target_object)
-            if not still_held:
-                print(f"[TRANSPORT] Grasp LOST in transit ({px} px). Routing to recovery.")
-                self.state = FSMState.RECOVERY
-                return
 
         print(f"[TRANSPORT] Descending to Z={GRASP_Z} for drop...")
         if not self._safe_move(drop_x, drop_y, GRASP_Z, speed=FINE_ADJUST_SPEED):
@@ -373,7 +369,7 @@ class Lite6FSM:
         self.state = FSMState.VERIFY
 
     def _handle_recovery(self):
-        print("\n─── [FSM: RECOVERY] Grasp lost / move fault ─────────────────")
+        print("\n─── [FSM: RECOVERY] Move fault mid-task ─────────────────────")
         # Release whatever we may be holding, clear any fault, re-home.
         self.robot.open_gripper()
         self.robot.stop_gripper()

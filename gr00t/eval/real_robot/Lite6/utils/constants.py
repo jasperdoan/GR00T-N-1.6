@@ -80,16 +80,30 @@ COLOR_RANGES = {
 
 # --- Visual Servoing (Image-Based Visual Servoing P-controller) ---
 VS_KP = 0.08                  # proportional gain: pixel error -> mm delta
-CENTER_TOLERANCE_PX = 10      # within this pixel error the object is "centered"
 MAX_SERVO_STEP_MM = 8.0       # clamp per-iteration delta so a big initial error
                               # can't command an overshoot at FINE_ADJUST_SPEED
 SERVO_DEADBAND_PX = 3         # ignore sub-pixel jitter below this error
 
-# Hand-eye offset: the wrist camera is NOT coaxial with the gripper TCP, so the
-# gripper sits over the object when the object is at (frame_center + offset), not
-# at the raw frame center. Tune (dx_px, dy_px) on hardware; (0,0) = no correction.
-# TODO: 
-CAMERA_CENTER_OFFSET = (0, 0)
+# Gripper ROI: where the object appears in the wrist camera when the gripper is
+# correctly over it (camera is NOT coaxial with the TCP). Measured from 3 samples
+# with the gripper hovering over the object at yaw=0:
+#   (627, 591, 162, 128), (609, 578, 130, 126), (618, 582, 150, 133)
+# ROI = union of the samples (609, 578, 180, 146) + 15 px margin per side.
+# The servo drives the blob centroid toward the ROI center and accepts only when
+# the blob's bounding box is FULLY inside this ROI.
+GRIPPER_ROI = (594, 563, 210, 176)   # (x, y, w, h) in wrist-cam pixels
+
+# Consecutive frames the blob must stay fully inside GRIPPER_ROI to lock the
+# servo (HSV mask edges flicker ~1-2 px; a single strict frame would chatter).
+SERVO_CONFIRM_FRAMES = 3
+
+# --- Yaw alignment (grasping rotated objects) ---
+# The object's in-image angle (cv2.minAreaRect at the hover pose) is mapped to a
+# gripper yaw command. Sign/offset depend on how the camera is mounted relative
+# to the gripper jaws — verify on hardware with a deliberately rotated cube.
+YAW_ALIGN_ENABLED  = True
+CAMERA_YAW_SIGN    = 1.0    # flip to -1.0 if the gripper rotates the wrong way
+CAMERA_YAW_OFFSET  = 0.0    # fixed mount rotation (deg) between image axes and jaws
 
 # --- FSM retry / timeout defaults ---
 VLA_TIMEOUT  = 15.0   # seconds for the visual-servo lock attempt
@@ -98,11 +112,3 @@ MAX_RETRIES  = 2
 # --- HSV object detection (top-down) ---
 MIN_BLOB_AREA_PX      = 100
 FRONT_MIN_PRESENCE_PX = 1500
-
-# --- Wrist-camera grasp confirmation ---
-# After closing the gripper, the target color must occupy at least this many
-# pixels inside the gripper ROI to confirm we actually grabbed the object
-# (instead of closing on air). Tune from the printed pixel counts on hardware.
-# TODO: 
-WRIST_GRASP_ROI    = (160, 360, 320, 120)   # (x, y, w, h) in wrist-cam pixels
-WRIST_GRASP_MIN_PX = 4000
