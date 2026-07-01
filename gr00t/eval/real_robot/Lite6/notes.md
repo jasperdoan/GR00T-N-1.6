@@ -92,3 +92,8 @@ Soft Kill --> Should still continue its motion / return to home / init position
 Currently it works, visual servoing is accurate. But once it has lower, it needs to wait a moment (like 3 seconds - put in constants.py) to let the gripper close on it and grip it. Then at target zone, open gripper to release and go back home.
 
 Turn on safety mode. Detect hand then pauses, resume if out of frame.
+
+
+─── [FSM: FINE_GRASP] Visual servoing + grasp ───────────────
+[Vision] Visual servoing 'red cube' into gripper ROI (594, 563, 210, 176)...
+^C

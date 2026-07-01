@@ -22,7 +22,9 @@ DEFAULT_SPEED = 200        # mm/s
 DEFAULT_ACCEL = 500        # mm/s^2
 FINE_ADJUST_SPEED = 80     # mm/s (for visual servoing)
 
-GRIPPER_SETTLE_S = 0.4     # pause after an open/close so the gripper finishes actuating
+GRIPPER_SETTLE_S = 0.4       # pause after an OPEN so the gripper finishes actuating
+GRIPPER_CLOSE_DWELL_S = 3.0  # dwell after a CLOSE so the jaws fully seat on the
+                             # object before lifting (Lite6 gripper is slow to bite)
 
 DEFAULT_TASK  = "check_in"
 SCAN_INTERVAL = 3.0  # seconds between scans when idle
@@ -40,8 +42,8 @@ TOP_VIEW_POSE = [-50.0, -150.0, 300.0, -180.0, 0.0, 0.0]
 # --- Workspace envelope (Cartesian mm) ---
 # Reject any homography/servo target outside this box before commanding a move,
 # so a bad detection can't fault the arm by driving it out of reach.
-WORKSPACE_X_RANGE = (-170.0, 10.0)
-WORKSPACE_Y_RANGE = (-310.0, -140.0)
+WORKSPACE_X_RANGE = (-180.0, 20.0)
+WORKSPACE_Y_RANGE = (-320.0, -130.0)
 WORKSPACE_Z_RANGE = (90.0, 310.0)
 
 

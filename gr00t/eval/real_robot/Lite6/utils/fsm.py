@@ -164,7 +164,11 @@ class Lite6FSM:
         last_frame_feed = 0.0
         while time.time() < deadline:
             if self.should_stop_cb and self.should_stop_cb():
-                self.robot.pause()
+                # Soft stop: do NOT pause — the in-flight trajectory finishes on
+                # the controller (xArm queues commands), the FSM unwinds, and the
+                # caller's cleanup path drives the arm home. Pausing here used to
+                # leave the arm frozen in state 4 so the home move never ran.
+                print("[FSM] Soft stop — letting current motion finish, then homing.")
                 return False
 
             # Keep the hand detector fed during travel (~10 Hz) — without this

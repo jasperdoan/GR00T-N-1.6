@@ -17,7 +17,7 @@ import time
 from xarm.wrapper import XArmAPI
 from utils.constants import (
     DEFAULT_SPEED, DEFAULT_ACCEL, FINE_ADJUST_SPEED,
-    GRIPPER_SETTLE_S,
+    GRIPPER_SETTLE_S, GRIPPER_CLOSE_DWELL_S,
     WORKSPACE_X_RANGE, WORKSPACE_Y_RANGE, WORKSPACE_Z_RANGE,
 )
 
@@ -182,10 +182,10 @@ class Lite6Controller:
     def close_gripper(self, wait=True):
         if not self.arm:
             return
-        print("[Robot] Closing gripper...")
+        print(f"[Robot] Closing gripper (dwell {GRIPPER_CLOSE_DWELL_S:.1f}s to seat the grip)...")
         self.arm.close_lite6_gripper()
         if wait:
-            time.sleep(GRIPPER_SETTLE_S)
+            time.sleep(GRIPPER_CLOSE_DWELL_S)
 
     def stop_gripper(self):
         """Stop driving the gripper motor (call after a settle to avoid overheating)."""

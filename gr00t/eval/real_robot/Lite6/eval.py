@@ -110,6 +110,7 @@ def main():
             safety_monitor.stop()
         if robot is not None:
             try:
+                robot.resume()   # clear any lingering pause so the home move actually runs
                 robot.move_to(*HOME_POSE[:3])
             except Exception:
                 pass
