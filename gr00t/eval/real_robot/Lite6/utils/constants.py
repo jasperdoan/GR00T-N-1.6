@@ -30,7 +30,7 @@ SCAN_INTERVAL = 3.0  # seconds between scans when idle
 # Safe height to travel above all objects
 SAFE_Z = 150.0
 # Height to execute the actual grasp
-GRASP_Z = 50.0
+GRASP_Z = 100.0
 # Default Home Position [X, Y, Z, Roll, Pitch, Yaw]
 HOME_POSE = [0.0, -150.0, 200.0, -180.0, 0.0, 0.0]
 TOP_VIEW_POSE = [-50.0, -150.0, 300.0, -180.0, 0.0, 0.0]
@@ -40,7 +40,7 @@ TOP_VIEW_POSE = [-50.0, -150.0, 300.0, -180.0, 0.0, 0.0]
 # so a bad detection can't fault the arm by driving it out of reach.
 WORKSPACE_X_RANGE = (-160.0, 0.0)
 WORKSPACE_Y_RANGE = (-300.0, -150.0)
-WORKSPACE_Z_RANGE = (50.0, 300.0)
+WORKSPACE_Z_RANGE = (100.0, 300.0)
 
 
 # --- Zone Definitions (Robot Cartesian Coordinates in mm) ---
@@ -53,11 +53,10 @@ ZONES = {
 # Top-down-camera pixel ROIs (x, y, w, h) per zone, keyed by the INTERNAL zone
 # names the FSM/NLP use. These restrict color masking to a specific zone so that
 # PRE_CHECK (source), VERIFY (target), and auto's task selection actually work.
-# TODO: replace with real pixel ROIs after calibrating the top-down camera.
 ZONE_PIXEL_ROI = {
-    "check_in":  (0,   0, 200, 200),
-    "storage":   (200, 0, 200, 200),
-    "check_out": (400, 0, 200, 200),
+    "check_in":  (166, 425, 235, 226),
+    "storage":   (158, 171, 255, 231),
+    "check_out": (542, 160, 249, 241),
 }
 
 # Display-name view of the same ROIs, used only for drawing snapshot overlays.

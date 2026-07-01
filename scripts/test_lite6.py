@@ -9,24 +9,24 @@ arm.set_state(state=0)
 
 #arm.move_gohome(wait=True)
 
-arm.set_position(x=0, y=-150, z=200, roll=-180, pitch=0, yaw=0, speed=100, is_radian=False, wait=True) # Init position
-print(arm.get_position(), arm.get_position(is_radian=False))
-arm.set_position(x=-50, y=-150, z=300, roll=-180, pitch=0, yaw=0, speed=200, is_radian=False, wait=True) # Top View position
-print(arm.get_position(), arm.get_position(is_radian=False))
-arm.open_lite6_gripper()
-time.sleep(0.5)
-arm.set_position(x=-60, y=-300, z=200, roll=-180, pitch=0, yaw=0, speed=200, is_radian=False, wait=True) # Checkin position
-print(arm.get_position(), arm.get_position(is_radian=False))
-arm.close_lite6_gripper()
-time.sleep(0.5)
-arm.set_position(x=-160, y=-300, z=200, roll=-180, pitch=0, yaw=0, speed=200, is_radian=False, wait=True) # Storage
-print(arm.get_position(), arm.get_position(is_radian=False))
-arm.set_position(x=-50, y=-150, z=300, roll=-180, pitch=0, yaw=0, speed=200, is_radian=False, wait=True) # Top View position
-print(arm.get_position(), arm.get_position(is_radian=False))
+# arm.set_position(x=0, y=-150, z=200, roll=-180, pitch=0, yaw=0, speed=100, is_radian=False, wait=True) # Init position
+# print(arm.get_position(), arm.get_position(is_radian=False))
+# arm.set_position(x=-50, y=-150, z=300, roll=-180, pitch=0, yaw=0, speed=200, is_radian=False, wait=True) # Top View position
+# print(arm.get_position(), arm.get_position(is_radian=False))
+# arm.open_lite6_gripper()
+# time.sleep(0.5)
+# arm.set_position(x=-60, y=-300, z=200, roll=-180, pitch=0, yaw=0, speed=200, is_radian=False, wait=True) # Checkin position
+# print(arm.get_position(), arm.get_position(is_radian=False))
+# arm.close_lite6_gripper()
+# time.sleep(0.5)
+# arm.set_position(x=-160, y=-300, z=200, roll=-180, pitch=0, yaw=0, speed=200, is_radian=False, wait=True) # Storage
+# print(arm.get_position(), arm.get_position(is_radian=False))
+# arm.set_position(x=-50, y=-150, z=300, roll=-180, pitch=0, yaw=0, speed=200, is_radian=False, wait=True) # Top View position
+# print(arm.get_position(), arm.get_position(is_radian=False))
 arm.set_position(x=-160, y=-150, z=200, roll=-180, pitch=0, yaw=0, speed=200, is_radian=False, wait=True) # Checkout
 print(arm.get_position(), arm.get_position(is_radian=False))
-arm.set_position(x=0, y=-150, z=200, roll=-180, pitch=0, yaw=0, speed=100, is_radian=False, wait=True) # Init position
-print(arm.get_position(), arm.get_position(is_radian=False))
+# arm.set_position(x=0, y=-150, z=200, roll=-180, pitch=0, yaw=0, speed=100, is_radian=False, wait=True) # Init position
+# print(arm.get_position(), arm.get_position(is_radian=False))
 # arm.set_position(x=300, y=0, z=250, roll=-180, pitch=0, yaw=0, speed=600, is_radian=False, wait=True)
 # print(arm.get_position(), arm.get_position(is_radian=False))
 
@@ -47,6 +47,6 @@ print(arm.get_position(), arm.get_position(is_radian=False))
 # print(arm.get_position(), arm.get_position(is_radian=False))
 
 # arm.move_gohome(wait=True)
-arm.stop_lite6_gripper()
+# arm.stop_lite6_gripper()
 time.sleep(0.5)
 arm.disconnect()

@@ -178,7 +178,7 @@ def calibrate(img: np.ndarray):
 
 def main():
     
-    path = os.path.expanduser("~/Downloads/captured_image.jpg")
+    path = os.path.expanduser("~/Downloads/storage.jpg")
     img  = cv2.imread(path)
     if img is None:
         raise FileNotFoundError(f"Image not found: {path}")
