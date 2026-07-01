@@ -2,7 +2,9 @@ import os
 
 # --- NETWORK & SYSTEM ---
 DEFAULT_IP = "192.168.1.189"
-WRIST_CAM_IDX = 0
+# Camera source: int → local /dev/video device index; str → network stream URL.
+# The wrist camera is hosted on a separate machine serving MJPEG over HTTP.
+CAMERA_SOURCE = "http://172.21.2.83:9988/stream.mjpg"
 
 INUSE_FLAG_PATH = "/tmp/lite6_inuse.flag"
 STOP_FLAG_PATH  = "/tmp/stop_lite6.flag"
@@ -12,8 +14,8 @@ STOP_FLAG_PATH  = "/tmp/stop_lite6.flag"
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MATRIX_PATH = os.path.join(BASE_DIR, "data", "homography_matrix.npy")
 # Separate output dirs so eval's before/after snapshots don't land in the auto dir.
-OUTPUT_DIR_EVAL = "/workspaces/data/outputs/GR00T-N-1.6/lite6_eval"
-OUTPUT_DIR_AUTO = "/workspaces/data/outputs/GR00T-N-1.6/lite6_auto"
+OUTPUT_DIR_EVAL = "gr00t/eval/real_robot/Lite6/data/outputs/GR00T-N-1.6/lite6_eval"
+OUTPUT_DIR_AUTO = "gr00t/eval/real_robot/Lite6/data/outputs/GR00T-N-1.6/lite6_auto"
 
 # --- ROBOT MOTION SETTINGS ---
 DEFAULT_SPEED = 200        # mm/s
@@ -28,7 +30,7 @@ SCAN_INTERVAL = 3.0  # seconds between scans when idle
 
 # --- Robot Poses & Heights (Cartesian mm) ---
 # Safe height to travel above all objects
-SAFE_Z = 150.0
+SAFE_Z = 200.0
 # Height to execute the actual grasp
 GRASP_Z = 100.0
 # Default Home Position [X, Y, Z, Roll, Pitch, Yaw]
@@ -38,9 +40,9 @@ TOP_VIEW_POSE = [-50.0, -150.0, 300.0, -180.0, 0.0, 0.0]
 # --- Workspace envelope (Cartesian mm) ---
 # Reject any homography/servo target outside this box before commanding a move,
 # so a bad detection can't fault the arm by driving it out of reach.
-WORKSPACE_X_RANGE = (-160.0, 0.0)
-WORKSPACE_Y_RANGE = (-300.0, -150.0)
-WORKSPACE_Z_RANGE = (100.0, 300.0)
+WORKSPACE_X_RANGE = (-170.0, 10.0)
+WORKSPACE_Y_RANGE = (-310.0, -140.0)
+WORKSPACE_Z_RANGE = (90.0, 310.0)
 
 
 # --- Zone Definitions (Robot Cartesian Coordinates in mm) ---

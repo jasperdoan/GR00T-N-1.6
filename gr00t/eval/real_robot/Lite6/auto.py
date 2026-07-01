@@ -14,7 +14,7 @@ import cv2
 
 from utils.constants import (
     DEFAULT_IP,
-    WRIST_CAM_IDX,
+    CAMERA_SOURCE,
     HOME_POSE, TOP_VIEW_POSE,
     ZONE_PIXEL_ROI,
     ALL_ZONES_DICT,
@@ -50,10 +50,16 @@ def detect_next_task(front_rgb, target_object=AUTO_TARGET):
 def main():
     parser = argparse.ArgumentParser(description="Lite6 Auto — continuous autonomous loop")
     parser.add_argument("--ip",        type=str,   default=DEFAULT_IP)
+    parser.add_argument("--camera",    type=str,   default=None,
+                        help="Camera source override: device index (e.g. 0) or stream URL")
     parser.add_argument("--timeout",   type=float, default=15.0)
     parser.add_argument("--retries",   type=int,   default=2)
     parser.add_argument("--no-safety", action="store_true")
     args = parser.parse_args()
+
+    camera_source = CAMERA_SOURCE
+    if args.camera is not None:
+        camera_source = int(args.camera) if args.camera.isdigit() else args.camera
 
     setup_signal_handlers()
     clear_stop_flag()
@@ -67,7 +73,7 @@ def main():
     robot = safety_monitor = None
     try:
         # Single physical camera (wrist), reused for the top-down view at TOP_VIEW_POSE.
-        cap = open_camera(WRIST_CAM_IDX, "wrist camera")
+        cap = open_camera(camera_source, "wrist camera")
 
         robot = Lite6Controller(args.ip)
         robot.connect()

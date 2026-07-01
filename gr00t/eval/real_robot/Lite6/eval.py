@@ -11,7 +11,7 @@ import cv2
 
 from utils.constants import (
     DEFAULT_IP,
-    WRIST_CAM_IDX,
+    CAMERA_SOURCE,
     HOME_POSE, TOP_VIEW_POSE,
     ALL_ZONES_DICT,
     OUTPUT_DIR_EVAL,
@@ -38,10 +38,16 @@ def main():
     parser.add_argument("--instruction", type=str, default="check in red cube",
                         help='Natural language instruction e.g. "check in red cube"')
     parser.add_argument("--ip",        type=str,   default=DEFAULT_IP)
+    parser.add_argument("--camera",    type=str,   default=None,
+                        help="Camera source override: device index (e.g. 0) or stream URL")
     parser.add_argument("--timeout",   type=float, default=15.0, help="Visual servoing timeout (s)")
     parser.add_argument("--retries",   type=int,   default=2,    help="Max retries on failure")
     parser.add_argument("--no-safety", action="store_true",      help="Disable hand detection safety")
     args = parser.parse_args()
+
+    camera_source = CAMERA_SOURCE
+    if args.camera is not None:
+        camera_source = int(args.camera) if args.camera.isdigit() else args.camera
 
     setup_signal_handlers()
     clear_stop_flag()
@@ -65,7 +71,7 @@ def main():
     robot = safety_monitor = None
     try:
         # Single physical camera (wrist), reused for the top-down view at TOP_VIEW_POSE.
-        cap = open_camera(WRIST_CAM_IDX, "wrist camera")
+        cap = open_camera(camera_source, "wrist camera")
 
         robot = Lite6Controller(args.ip)
         robot.connect()                       # raises on failure — no blind runs

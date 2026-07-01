@@ -59,15 +59,90 @@ def _clean_mask(mask: np.ndarray, kernel_size: int = 5) -> np.ndarray:
 # Camera helpers
 # =============================================================================
 
-def open_camera(index: int, name: str = "camera"):
+class LatestFrameReader:
     """
-    Open a VideoCapture, fail fast if the index is wrong, and minimise buffering
-    so the servo loop reads the LATEST frame instead of a stale buffered one.
-    Raises RuntimeError if the camera cannot be opened.
+    Drains a VideoCapture in a daemon thread and keeps only the NEWEST frame.
+
+    Needed for network streams: the FFMPEG HTTP demuxer ignores
+    CAP_PROP_BUFFERSIZE and queues frames, so a plain read() returns
+    progressively staler images whenever the control loop runs slower than the
+    stream FPS — fatal for visual servoing (the arm would act on pre-move
+    frames and oscillate).
+
+    Mirrors the cv2.VideoCapture surface the rest of the code uses
+    (grab/retrieve/read/isOpened/release), so read_fresh() works unchanged.
     """
-    cap = cv2.VideoCapture(index)
+    def __init__(self, cap):
+        import threading
+        self._cap = cap
+        self._lock = threading.Lock()
+        self._ret, self._frame = False, None
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        while self._running:
+            ret, frame = self._cap.read()
+            if ret:
+                with self._lock:
+                    self._ret, self._frame = True, frame
+            else:
+                time.sleep(0.01)   # stream hiccup; don't spin at 100% CPU
+
+    def grab(self):
+        return self._ret
+
+    def retrieve(self):
+        return self.read()
+
+    def read(self):
+        with self._lock:
+            if self._frame is None:
+                return False, None
+            return self._ret, self._frame.copy()
+
+    def isOpened(self):
+        return self._running and self._cap.isOpened()
+
+    def release(self):
+        self._running = False
+        self._thread.join(timeout=1.0)
+        self._cap.release()
+
+
+def open_camera(source, name: str = "camera"):
+    """
+    Open a camera from either a local device index (int) or a stream URL (str).
+    Raises RuntimeError if it cannot be opened or produces no frames.
+
+    Local device: VideoCapture(index) with BUFFERSIZE=1 as before.
+    Stream URL:   VideoCapture(url, CAP_FFMPEG) wrapped in LatestFrameReader so
+                  every read is the newest frame, not a buffered stale one.
+    """
+    if isinstance(source, str):
+        cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            raise RuntimeError(
+                f"[Vision] Could not open {name} stream at {source}. "
+                f"If the URL host is 0.0.0.0, replace it with the LAN IP of the "
+                f"machine hosting the camera (0.0.0.0 is only its listen address)."
+            )
+        reader = LatestFrameReader(cap)
+        # Wait for the first frame so downstream code never sees an empty reader.
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            ret, _ = reader.read()
+            if ret:
+                print(f"[Vision] Opened {name} stream at {source}.")
+                return reader
+            time.sleep(0.05)
+        reader.release()
+        raise RuntimeError(f"[Vision] {name} stream at {source} opened but produced no frames within 5 s.")
+
+    cap = cv2.VideoCapture(source)
     if not cap.isOpened():
-        raise RuntimeError(f"[Vision] Could not open {name} at index {index}.")
+        raise RuntimeError(f"[Vision] Could not open {name} at index {source}.")
     try:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:
@@ -75,7 +150,7 @@ def open_camera(index: int, name: str = "camera"):
     # Warm up: discard the first few frames so exposure/auto-WB settle.
     for _ in range(5):
         cap.read()
-    print(f"[Vision] Opened {name} at index {index}.")
+    print(f"[Vision] Opened {name} at index {source}.")
     return cap
 
 
