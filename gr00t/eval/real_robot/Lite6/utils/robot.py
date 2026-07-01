@@ -17,7 +17,7 @@ import time
 from xarm.wrapper import XArmAPI
 from utils.constants import (
     DEFAULT_SPEED, DEFAULT_ACCEL, FINE_ADJUST_SPEED,
-    GRIPPER_SETTLE_S, GRIPPER_CLOSE_DWELL_S,
+    GRIPPER_OPEN_DWELL_S, GRIPPER_CLOSE_DWELL_S,
     WORKSPACE_X_RANGE, WORKSPACE_Y_RANGE, WORKSPACE_Z_RANGE,
 )
 
@@ -172,12 +172,19 @@ class Lite6Controller:
     # -------------------------------------------------------------------------
 
     def open_gripper(self, wait=True):
+        """
+        Open fully: drive the motor for the whole travel (GRIPPER_OPEN_DWELL_S),
+        THEN stop it. Stopping early froze the jaws half-open; stopping once
+        fully open is safe and keeps the motor cool. (Close must stay driven —
+        see close_gripper.)
+        """
         if not self.arm:
             return
-        print("[Robot] Opening gripper...")
+        print(f"[Robot] Opening gripper (dwell {GRIPPER_OPEN_DWELL_S:.1f}s for full travel)...")
         self.arm.open_lite6_gripper()
         if wait:
-            time.sleep(GRIPPER_SETTLE_S)
+            time.sleep(GRIPPER_OPEN_DWELL_S)
+            self.arm.stop_lite6_gripper()
 
     def close_gripper(self, wait=True):
         if not self.arm:

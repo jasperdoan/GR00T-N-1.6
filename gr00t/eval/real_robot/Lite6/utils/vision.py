@@ -22,6 +22,7 @@ from utils.constants import (
     MAX_SERVO_STEP_MM,
     SERVO_DEADBAND_PX,
     GRIPPER_ROI,
+    CENTER_LOCK_TOL_PX,
     SERVO_CONFIRM_FRAMES,
     SERVO_SETTLE_S,
     SEARCH_START_DELAY_S,
@@ -430,12 +431,11 @@ def visual_servo_to_grasp(
             so H's DIRECTION is always right — only its scale is off (camera is
             closer → H overestimates mm/px by ~the height ratio), which the
             gain + step clamp absorb. No hand-tuned axis signs.
-    Accept: when the blob's bounding box sits ENTIRELY inside GRIPPER_ROI for
-            SERVO_CONFIRM_FRAMES consecutive frames while the arm stands still.
-            (Centroid-at-center proved unreachable on hardware: the ROI sits at
-            the frame's bottom edge and detection dies — clipping + gripper
-            shadow — at the exact-center pose. Containment slop is ~±4 mm at
-            the measured hover scale: within jaw tolerance.)
+    Accept: when the blob CENTROID is within CENTER_LOCK_TOL_PX of the ROI
+            center for SERVO_CONFIRM_FRAMES consecutive frames while the arm
+            stands still. The centroid is ROTATION-INVARIANT — bbox-in-ROI
+            locking was unsatisfiable for rotated cubes, whose axis-aligned
+            bbox inflates by √2 and exceeded the ROI height exactly.
 
     Lost target: first RETURN to the arm position where the blob was last
             detected (losses cluster at the final-approach frontier; backing
@@ -473,7 +473,6 @@ def visual_servo_to_grasp(
     search_center = None
     spiral_iter = None
     search_steps = 0
-    roi_hint_shown = False
 
     print(f"[Vision] Visual servoing '{target_object}' into gripper ROI {GRIPPER_ROI}...")
 
@@ -592,26 +591,20 @@ def visual_servo_to_grasp(
         err_x = obj_cx - aim_x
         err_y = obj_cy - aim_y
 
-        # --- Acceptance: the blob's bounding box ENTIRELY inside GRIPPER_ROI,
-        # held for N consecutive frames while the arm stands still. ---
-        if blob_inside_roi(bbox, GRIPPER_ROI):
+        # --- Acceptance: centroid within tolerance of the aim point, held for
+        # N consecutive frames while the arm stands still. Rotation-invariant
+        # (the axis-aligned bbox is not: a rotated cube's bbox inflates by √2
+        # and could never fit the ROI, spinning the servo until timeout). ---
+        if abs(err_x) <= CENTER_LOCK_TOL_PX and abs(err_y) <= CENTER_LOCK_TOL_PX:
             confirm_count += 1
             last_angle = angle
             if confirm_count >= SERVO_CONFIRM_FRAMES:
-                print(f"[Vision] Blob {bbox} fully inside ROI for {confirm_count} frames "
-                      f"(centroid {err_x:+d},{err_y:+d} px off center). "
-                      f"Locked (angle={last_angle:.1f}°).")
+                print(f"[Vision] Centroid ({err_x:+d},{err_y:+d}) px from aim for "
+                      f"{confirm_count} frames. Locked (angle={last_angle:.1f}°).")
                 return True, last_angle
             time.sleep(SERVO_SETTLE_S)   # hold still; re-read to confirm stability
             continue
         confirm_count = 0
-
-        # Near-centered but never contained → the ROI is too small for the
-        # object's apparent size; servoing can't fix that. Name the knob to turn.
-        if abs(err_x) <= 8 and abs(err_y) <= 8 and not roi_hint_shown:
-            print(f"[Vision] Hint: centroid near center but bbox {bbox} not contained in "
-                  f"GRIPPER_ROI {GRIPPER_ROI} — the ROI may be too tight for this object.")
-            roi_hint_shown = True
 
         # --- Drive: centroid error toward the ROI center ---
         cmd_x = aim_x if abs(err_x) < SERVO_DEADBAND_PX else obj_cx
@@ -630,6 +623,12 @@ def visual_servo_to_grasp(
         gain = SERVO_GAIN * loss_backoff
         dx = _clamp(gain * (obj_robot[0] - aim_robot[0]), MAX_SERVO_STEP_MM)
         dy = _clamp(gain * (obj_robot[1] - aim_robot[1]), MAX_SERVO_STEP_MM)
+
+        # Nothing meaningful to command (dead-banded to ~zero): don't spam the
+        # controller with no-op moves; just re-read.
+        if abs(dx) < 0.05 and abs(dy) < 0.05:
+            time.sleep(0.05)
+            continue
 
         print(f"[Vision] err=({err_x:+d},{err_y:+d}) px → step=({dx:+.1f},{dy:+.1f}) mm")
         if not robot.move_to(pos[0] + dx, pos[1] + dy, pos[2],

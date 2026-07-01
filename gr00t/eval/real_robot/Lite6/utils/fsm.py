@@ -5,8 +5,8 @@ States:
   PRE_CHECK      → verify target color is present in the SOURCE zone ROI
   SCANNING       → top-view pose → homography → robot XY target
   GLOBAL_APPROACH→ move to (X, Y, SAFE_Z) above the object
-  FINE_GRASP     → servo blob into GRIPPER_ROI → yaw-align → descend → grasp → lift
-  TRANSPORT      → move to target zone (yaw back to straight), drop
+  FINE_GRASP     → servo centroid to ROI center → yaw-align → descend → grasp → lift
+  TRANSPORT      → move to jittered target-zone point (yaw straightens), drop
   RECOVERY       → move fault mid-task → release, re-home, retry
   VERIFY         → confirm object landed in the TARGET zone ROI
   DONE / FAILED
@@ -17,19 +17,23 @@ Safety / robustness:
   - Every move checks its return code; faults route to recovery/FAILED.
   - Vision is zone-restricted, so PRE_CHECK/VERIFY mean what they say.
   - No post-grasp camera check: the object is not visible in the wrist camera
-    once gripped (mount geometry), so we rely on the servo's strict ROI
-    containment + the Lite6's repeatability, and VERIFY catches a failed
-    pick because the object never shows up in the target zone.
+    once gripped (mount geometry), so we rely on the servo's centroid lock +
+    the Lite6's repeatability, and VERIFY catches a failed pick because the
+    object never shows up in the target zone.
+  - Soft stop finishes an in-progress manipulation (SO-ARM semantics): once
+    the servo has locked, descend/grasp/transport/drop run to completion and
+    only then does the system exit. Pre-lock, a stop aborts immediately.
 
 Grasp orientation:
-  The servo runs at yaw=0 (GRIPPER_ROI was measured at yaw=0). Once the blob
-  is contained, the object's in-image angle from that final frame drives a
+  The servo runs at yaw=0 (the aim point was measured at yaw=0). Once the
+  servo locks, the object's in-image angle from that final frame drives a
   pure yaw rotation about the TCP — which does NOT move the gripper off the
   object — then the descent/grasp/lift carry that yaw. Transport commands
   yaw=0, so the cube is straightened before the drop.
 """
 
 import time
+import random
 from enum import Enum, auto
 from typing import Optional
 
@@ -41,6 +45,7 @@ from utils.constants import (
     DEFAULT_SPEED, FINE_ADJUST_SPEED,
     YAW_ALIGN_ENABLED, CAMERA_YAW_SIGN, CAMERA_YAW_OFFSET,
     POSE_TOL_MM, POSE_TOL_DEG, MOVE_TIMEOUT_S,
+    PLACE_VARIATION_MM,
 )
 from utils.vision import (
     SafetyMonitor,
@@ -110,8 +115,15 @@ class Lite6FSM:
             FSMState.RECOVERY:        self._handle_recovery,
             FSMState.VERIFY:          self._handle_verify,
         }
+        # Soft-stop semantics (SO-ARM style): a stop may abort the task only
+        # BEFORE the arm has committed to the object. From TRANSPORT onward
+        # (object in gripper) the FSM runs to completion — finish the carry,
+        # drop it in the target zone, verify — and the caller's loop exits
+        # afterwards. Commitment point = servo lock inside FINE_GRASP.
+        abortable = {FSMState.PRE_CHECK, FSMState.SCANNING,
+                     FSMState.GLOBAL_APPROACH, FSMState.FINE_GRASP}
         while self.state not in (FSMState.DONE, FSMState.FAILED):
-            if self._check_abort():
+            if self.state in abortable and self._check_abort():
                 break
             handlers[self.state]()
         return self.state
@@ -147,14 +159,21 @@ class Lite6FSM:
     # Returns True on success, False on rejection/fault/abort/timeout.
     # -------------------------------------------------------------------------
 
-    def _safe_move(self, x, y, z, roll=-180.0, pitch=0.0, yaw=0.0, speed=DEFAULT_SPEED) -> bool:
+    def _safe_move(self, x, y, z, roll=-180.0, pitch=0.0, yaw=0.0,
+                   speed=DEFAULT_SPEED, interruptible=True) -> bool:
+        """
+        interruptible=False marks a COMMITTED move (post-grasp-lock: descend,
+        lift, transport, recovery homing): a soft stop is ignored so the
+        manipulation finishes and the object is delivered before shutdown.
+        Hand-safety pause/resume and fault handling remain active either way.
+        """
         # Don't even start into a workspace the hand is currently occupying.
         if self.safety_monitor:
             while self.safety_monitor.is_hand_present():
                 print("[SAFETY] Hand present — waiting before move...")
                 time.sleep(0.1)
 
-        if self._check_abort():
+        if interruptible and self._check_abort():
             return False
 
         if not self.robot.move_to(x, y, z, roll=roll, pitch=pitch, yaw=yaw, speed=speed, wait=False):
@@ -163,7 +182,7 @@ class Lite6FSM:
         deadline = time.time() + MOVE_TIMEOUT_S
         last_frame_feed = 0.0
         while time.time() < deadline:
-            if self.should_stop_cb and self.should_stop_cb():
+            if interruptible and self.should_stop_cb and self.should_stop_cb():
                 # Soft stop: do NOT pause — the in-flight trajectory finishes on
                 # the controller (xArm queues commands), the FSM unwinds, and the
                 # caller's cleanup path drives the arm home. Pausing here used to
@@ -346,7 +365,8 @@ class Lite6FSM:
         if YAW_ALIGN_ENABLED and obj_angle is not None and abs(obj_angle) > 1.0:
             grasp_yaw = CAMERA_YAW_SIGN * obj_angle + CAMERA_YAW_OFFSET
             print(f"[FINE_GRASP] Object rotated {obj_angle:.1f}° — aligning gripper yaw to {grasp_yaw:.1f}°.")
-            if not self._safe_move(grasp_x, grasp_y, pos[2], yaw=grasp_yaw, speed=FINE_ADJUST_SPEED):
+            if not self._safe_move(grasp_x, grasp_y, pos[2], yaw=grasp_yaw,
+                                   speed=FINE_ADJUST_SPEED, interruptible=False):
                 if self._fail_or_retry("Yaw alignment move failed"):
                     self.state = FSMState.FAILED
                 else:
@@ -355,7 +375,8 @@ class Lite6FSM:
                 return
 
         print(f"[FINE_GRASP] Descending to Z={GRASP_Z} (yaw={grasp_yaw:.1f}°)...")
-        if not self._safe_move(grasp_x, grasp_y, GRASP_Z, yaw=grasp_yaw, speed=FINE_ADJUST_SPEED):
+        if not self._safe_move(grasp_x, grasp_y, GRASP_Z, yaw=grasp_yaw,
+                               speed=FINE_ADJUST_SPEED, interruptible=False):
             if self._fail_or_retry("Descent to grasp failed"):
                 self.state = FSMState.FAILED
             else:
@@ -364,12 +385,13 @@ class Lite6FSM:
             return
 
         # No camera confirmation possible here — the object is not visible in
-        # the wrist camera once gripped. The strict ROI containment above plus
-        # the Lite6's repeatability carry the grasp; VERIFY catches a miss.
+        # the wrist camera once gripped. The servo's centroid lock plus the
+        # Lite6's repeatability carry the grasp; VERIFY catches a miss.
         self.robot.close_gripper()
 
         print(f"[FINE_GRASP] Lifting to Z={SAFE_Z} (keeping yaw until clear of table)...")
-        if not self._safe_move(grasp_x, grasp_y, SAFE_Z, yaw=grasp_yaw, speed=FINE_ADJUST_SPEED):
+        if not self._safe_move(grasp_x, grasp_y, SAFE_Z, yaw=grasp_yaw,
+                               speed=FINE_ADJUST_SPEED, interruptible=False):
             self.state = FSMState.RECOVERY
             return
 
@@ -385,34 +407,40 @@ class Lite6FSM:
             return
         drop_x, drop_y = zone["x"], zone["y"]
 
+        # Jitter the drop point (±PLACE_VARIATION_MM) so repeated cycles don't
+        # stack objects on the exact same spot. Fall back to the nominal zone
+        # coords if the jittered point leaves the workspace envelope.
+        jx = drop_x + random.uniform(-PLACE_VARIATION_MM, PLACE_VARIATION_MM)
+        jy = drop_y + random.uniform(-PLACE_VARIATION_MM, PLACE_VARIATION_MM)
+        if self.robot.in_workspace(jx, jy, SAFE_Z) and self.robot.in_workspace(jx, jy, GRASP_Z):
+            print(f"[TRANSPORT] Place variation: ({jx - drop_x:+.1f}, {jy - drop_y:+.1f}) mm")
+            drop_x, drop_y = jx, jy
+
         # This move commands yaw=0 (the _safe_move default), so a cube grasped
         # at an angle is rotated back to straight in mid-air before the drop.
-        print(f"[TRANSPORT] Moving to {self.target_zone} ({drop_x}, {drop_y}) at Z={SAFE_Z}...")
-        if not self._safe_move(drop_x, drop_y, SAFE_Z, speed=DEFAULT_SPEED):
+        print(f"[TRANSPORT] Moving to {self.target_zone} ({drop_x:.1f}, {drop_y:.1f}) at Z={SAFE_Z}...")
+        if not self._safe_move(drop_x, drop_y, SAFE_Z, speed=DEFAULT_SPEED, interruptible=False):
             self.state = FSMState.RECOVERY
             return
 
         print(f"[TRANSPORT] Descending to Z={GRASP_Z} for drop...")
-        if not self._safe_move(drop_x, drop_y, GRASP_Z, speed=FINE_ADJUST_SPEED):
+        if not self._safe_move(drop_x, drop_y, GRASP_Z, speed=FINE_ADJUST_SPEED, interruptible=False):
             self.state = FSMState.RECOVERY
             return
 
-        self.robot.open_gripper()
-        self.robot.stop_gripper()
-        time.sleep(0.2)
+        self.robot.open_gripper()   # dwells for full travel, then stops the motor
 
         print(f"[TRANSPORT] Lifting back to Z={SAFE_Z}...")
-        self._safe_move(drop_x, drop_y, SAFE_Z, speed=FINE_ADJUST_SPEED)
+        self._safe_move(drop_x, drop_y, SAFE_Z, speed=FINE_ADJUST_SPEED, interruptible=False)
         self.state = FSMState.VERIFY
 
     def _handle_recovery(self):
         print("\n─── [FSM: RECOVERY] Move fault mid-task ─────────────────────")
         # Release whatever we may be holding, clear any fault, re-home.
-        self.robot.open_gripper()
-        self.robot.stop_gripper()
+        self.robot.open_gripper()   # dwells for full travel, then stops the motor
         if self.robot.has_error():
             self.robot.clear_errors()
-        self._safe_move(*HOME_POSE[:3])
+        self._safe_move(*HOME_POSE[:3], interruptible=False)
 
         if self._fail_or_retry("Recovering from lost grasp / fault"):
             self.state = FSMState.FAILED

@@ -22,9 +22,14 @@ DEFAULT_SPEED = 200        # mm/s
 DEFAULT_ACCEL = 500        # mm/s^2
 FINE_ADJUST_SPEED = 80     # mm/s (for visual servoing)
 
-GRIPPER_SETTLE_S = 0.4       # pause after an OPEN so the gripper finishes actuating
+GRIPPER_OPEN_DWELL_S  = 1.5  # dwell after an OPEN before stopping the motor —
+                             # a short dwell cut the motor mid-travel (half-open)
 GRIPPER_CLOSE_DWELL_S = 3.0  # dwell after a CLOSE so the jaws fully seat on the
                              # object before lifting (Lite6 gripper is slow to bite)
+
+# Uniform random offset applied to each place/drop position so repeated cycles
+# don't stack objects on the exact same spot (mirrors SO100's place variation).
+PLACE_VARIATION_MM = 10.0
 
 DEFAULT_TASK  = "check_in"
 SCAN_INTERVAL = 3.0  # seconds between scans when idle
@@ -120,15 +125,21 @@ MOVE_TIMEOUT_S = 30.0   # give up (and fail the move) after this long
 # with the gripper hovering over the object at yaw=0:
 #   (627, 591, 162, 128), (609, 578, 130, 126), (618, 582, 150, 133)
 # ROI = union of the samples (609, 578, 180, 146) + 15 px margin per side.
-# LOCK criterion: the blob's bounding box must sit ENTIRELY inside this ROI.
-# (A centroid-at-center lock proved unreachable on hardware: the ROI sits at
-# the frame's bottom edge, and the cube becomes undetectable — edge clipping +
-# gripper shadow — precisely at the exact-center pose. Containment slop is
-# ±25 px ≈ ±4.4 mm at the measured 0.175 mm/px hover scale: fine for the jaws.)
+# The ROI defines the servo AIM POINT (its center) and the snapshot overlay —
+# it is NOT the lock criterion. Bbox-inside-ROI locking was removed because the
+# axis-aligned bbox is rotation-DEPENDENT: a 45°-rotated cube's bbox inflates
+# by √2 (observed 196×176 vs straight 150×130) and exactly matched the ROI
+# height, making containment unsatisfiable → the servo spun until timeout.
 GRIPPER_ROI = (594, 563, 210, 176)   # (x, y, w, h) in wrist-cam pixels
 
-# Consecutive frames the blob must stay fully inside GRIPPER_ROI to lock the
-# servo (HSV mask edges flicker ~1-2 px; a single strict frame would chatter).
+# LOCK criterion (rotation-invariant): blob CENTROID within this many pixels of
+# the ROI center, per axis. 8 px ≈ 1.4 mm at the measured 0.175 mm/px hover
+# scale. Centroid detection at dead center is reliable since the red V-floor
+# shadow fix (hardware log: err (0,+2) stable for ~60 frames).
+CENTER_LOCK_TOL_PX = 8
+
+# Consecutive frames the centroid must hold within tolerance to lock the servo
+# (HSV mask edges flicker ~1-2 px; a single strict frame would chatter).
 SERVO_CONFIRM_FRAMES = 3
 
 # --- Lost-target spiral search (fine servoing) ---
