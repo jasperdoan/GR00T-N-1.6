@@ -1,0 +1,171 @@
+import os
+
+# --- NETWORK & SYSTEM ---
+DEFAULT_IP = "192.168.1.189"
+# Camera source: int → local /dev/video device index; str → network stream URL.
+# The wrist camera is hosted on a separate machine serving MJPEG over HTTP.
+CAMERA_SOURCE = "http://172.21.2.83:9988/stream.mjpg"
+
+INUSE_FLAG_PATH = "/tmp/lite6_inuse.flag"
+STOP_FLAG_PATH  = "/tmp/stop_lite6.flag"
+
+
+# --- FILE PATHS ---
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MATRIX_PATH = os.path.join(BASE_DIR, "data", "homography_matrix.npy")
+# Separate output dirs so eval's before/after snapshots don't land in the auto dir.
+OUTPUT_DIR_EVAL = "gr00t/eval/real_robot/Lite6/data/outputs/GR00T-N-1.6/lite6_eval"
+OUTPUT_DIR_AUTO = "gr00t/eval/real_robot/Lite6/data/outputs/GR00T-N-1.6/lite6_auto"
+
+# --- ROBOT MOTION SETTINGS ---
+DEFAULT_SPEED = 200        # mm/s
+DEFAULT_ACCEL = 500        # mm/s^2
+FINE_ADJUST_SPEED = 80     # mm/s (for visual servoing)
+
+GRIPPER_OPEN_DWELL_S  = 1.5  # dwell after an OPEN before stopping the motor —
+                             # a short dwell cut the motor mid-travel (half-open)
+GRIPPER_CLOSE_DWELL_S = 3.0  # dwell after a CLOSE so the jaws fully seat on the
+                             # object before lifting (Lite6 gripper is slow to bite)
+
+# Uniform random offset applied to each place/drop position so repeated cycles
+# don't stack objects on the exact same spot (mirrors SO100's place variation).
+PLACE_VARIATION_MM = 10.0
+
+DEFAULT_TASK  = "check_in"
+SCAN_INTERVAL = 3.0  # seconds between scans when idle
+
+
+# --- Robot Poses & Heights (Cartesian mm) ---
+# Safe height to travel above all objects
+SAFE_Z = 200.0
+# Height to execute the actual grasp
+GRASP_Z = 100.0
+# Default Home Position [X, Y, Z, Roll, Pitch, Yaw]
+HOME_POSE = [0.0, -150.0, 200.0, -180.0, 0.0, 0.0]
+TOP_VIEW_POSE = [-50.0, -150.0, 300.0, -180.0, 0.0, 0.0]
+
+# --- Workspace envelope (Cartesian mm) ---
+# Reject any homography/servo target outside this box before commanding a move,
+# so a bad detection can't fault the arm by driving it out of reach.
+WORKSPACE_X_RANGE = (-200.0, 40.0)
+WORKSPACE_Y_RANGE = (-340.0, -110.0)
+WORKSPACE_Z_RANGE = (90.0, 310.0)
+
+
+# --- Zone Definitions (Robot Cartesian Coordinates in mm) ---
+ZONES = {
+    "check_in":  {"x": -60.0, "y": -300.0},
+    "storage":   {"x": -160.0, "y": -300.0},
+    "check_out": {"x": -160.0, "y": -150.0}
+}
+
+# Top-down-camera pixel ROIs (x, y, w, h) per zone, keyed by the INTERNAL zone
+# names the FSM/NLP use. These restrict color masking to a specific zone so that
+# PRE_CHECK (source), VERIFY (target), and auto's task selection actually work.
+ZONE_PIXEL_ROI = {
+    "check_in":  (166, 425, 235, 226),
+    "storage":   (158, 171, 255, 231),
+    "check_out": (542, 160, 249, 241),
+}
+
+# Display-name view of the same ROIs, used only for drawing snapshot overlays.
+ALL_ZONES_DICT = {
+    "Check In":  ZONE_PIXEL_ROI["check_in"],
+    "Storage":   ZONE_PIXEL_ROI["storage"],
+    "Check Out": ZONE_PIXEL_ROI["check_out"],
+}
+
+
+# --- Language & Vision Definitions ---
+KNOWN_OBJECTS = ["red cube", "blue cube", "yellow cube", "green cube"]
+
+# HSV Color Ranges (Lower Bound, Upper Bound)
+# Red's V floor is 60 (not 100): during the final grasp approach the gripper
+# casts a shadow on the cube and V drops — a V>=100 floor made the cube vanish
+# from detection precisely at the grasp pose.
+COLOR_RANGES = {
+    "red":    [((0, 100, 60), (10, 255, 255)), ((160, 100, 60), (180, 255, 255))],
+    "blue":   [((100, 150, 50), (140, 255, 255))],
+    "yellow": [((20, 100, 100), (30, 255, 255))],
+    "green":  [((40, 50, 50), (90, 255, 255))],
+}
+
+# --- Visual Servoing (Image-Based Visual Servoing P-controller) ---
+# The pixel error is mapped to a robot-frame delta THROUGH THE HOMOGRAPHY
+# (H(p_obj) - H(p_aim)): the camera's orientation never changes between the
+# calibration pose and the hover pose, so H's direction is always correct and
+# only its scale is off (camera is closer at hover -> H overestimates mm/px by
+# roughly the height ratio). SERVO_GAIN damps that overestimate.
+# Steps are error-proportional (gradient-descent-like): ~MAX_SERVO_STEP_MM when
+# far, ~1 mm near the target.
+# GAIN MEASURED FROM HARDWARE (check_in log 2026-07-01): a (-7.3, -8.0) mm step
+# changed the pixel error by (+29, +42) px → true scale at hover ≈ 0.175 mm/px,
+# while H predicts ≈ 0.39 mm/px — a 2.2x overestimate. Effective per-step
+# fraction = SERVO_GAIN × 2.2, so 0.22 here ≈ 0.5 real (stable, no overshoot).
+SERVO_GAIN = 0.22             # fraction of the homography-mapped error per step
+MAX_SERVO_STEP_MM = 8.0       # clamp per-iteration delta so a big initial error
+                              # can't command an overshoot at FINE_ADJUST_SPEED
+SERVO_DEADBAND_PX = 3         # ignore sub-pixel jitter below this error
+
+# Settle time after each servo nudge before reading the camera. The MJPEG
+# stream has encode/transmit latency; without this, each step is computed from
+# a slightly PRE-move frame, which systematically overshoots.
+SERVO_SETTLE_S = 0.15
+
+# --- Move completion (pose convergence) ---
+# _safe_move issues non-blocking moves and detects completion by polling the
+# actual pose — get_is_moving() lags after a non-blocking command and once let
+# the FSM race ahead while the arm was still at TOP_VIEW_POSE.
+POSE_TOL_MM    = 2.0    # XYZ distance to target to count as "arrived"
+POSE_TOL_DEG   = 2.0    # yaw distance (covers yaw-only alignment moves)
+MOVE_TIMEOUT_S = 30.0   # give up (and fail the move) after this long
+
+# Gripper ROI: where the object appears in the wrist camera when the gripper is
+# correctly over it (camera is NOT coaxial with the TCP). Measured from 3 samples
+# with the gripper hovering over the object at yaw=0:
+#   (627, 591, 162, 128), (609, 578, 130, 126), (618, 582, 150, 133)
+# ROI = union of the samples (609, 578, 180, 146) + 15 px margin per side.
+# The ROI defines the servo AIM POINT (its center) and the snapshot overlay —
+# it is NOT the lock criterion. Bbox-inside-ROI locking was removed because the
+# axis-aligned bbox is rotation-DEPENDENT: a 45°-rotated cube's bbox inflates
+# by √2 (observed 196×176 vs straight 150×130) and exactly matched the ROI
+# height, making containment unsatisfiable → the servo spun until timeout.
+GRIPPER_ROI = (594, 563, 210, 176)   # (x, y, w, h) in wrist-cam pixels
+
+# LOCK criterion (rotation-invariant): blob CENTROID within this many pixels of
+# the ROI center, per axis. 8 px ≈ 1.4 mm at the measured 0.175 mm/px hover
+# scale. Centroid detection at dead center is reliable since the red V-floor
+# shadow fix (hardware log: err (0,+2) stable for ~60 frames).
+CENTER_LOCK_TOL_PX = 8
+
+# Consecutive frames the centroid must hold within tolerance to lock the servo
+# (HSV mask edges flicker ~1-2 px; a single strict frame would chatter).
+SERVO_CONFIRM_FRAMES = 3
+
+# --- Lost-target spiral search (fine servoing) ---
+# If the blob is not visible in the wrist camera at hover (approach error of a
+# few cm is enough given the offset mount), the servo walks the arm in an
+# expanding square spiral around the approach point until the blob re-enters
+# the frame; normal servoing then resumes. Exhausting the budget aborts early
+# so the FSM's retry path (re-scan from top view) runs instead of idling.
+SEARCH_START_DELAY_S = 1.0   # blob must be unseen this long before searching
+                             # (ignores single-frame detection flicker)
+SEARCH_STEP_MM       = 7.5  # spiral leg increment per nudge
+SEARCH_MAX_STEPS     = 24    # nudge budget before giving up (covers ~±80 mm)
+
+# --- Yaw alignment (grasping rotated objects) ---
+# The object's in-image angle (cv2.minAreaRect at the hover pose) is mapped to a
+# gripper yaw command. Sign/offset depend on how the camera is mounted relative
+# to the gripper jaws — verify on hardware with a deliberately rotated cube.
+YAW_ALIGN_ENABLED  = True
+CAMERA_YAW_SIGN    = 1.0    # flip to -1.0 if the gripper rotates the wrong way
+CAMERA_YAW_OFFSET  = 0.0    # fixed mount rotation (deg) between image axes and jaws
+
+# --- FSM retry / timeout defaults ---
+VLA_TIMEOUT  = 20.0   # seconds for the visual-servo lock attempt (tight centroid
+                      # lock + per-step settle needs a bit more than the old 15)
+MAX_RETRIES  = 2
+
+# --- HSV object detection (top-down) ---
+MIN_BLOB_AREA_PX      = 100
+FRONT_MIN_PRESENCE_PX = 1500

@@ -4,7 +4,7 @@ import os
 
 def calibrate():
     # 1. Load the image
-    img_path = os.path.expanduser("~/Downloads/zed_captured_image.jpg")
+    img_path = os.path.expanduser("~/Downloads/captured_image.jpg")
     if not os.path.exists(img_path):
         print(f"Error: Image not found at {img_path}")
         return
