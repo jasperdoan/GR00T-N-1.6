@@ -39,7 +39,7 @@ SCAN_INTERVAL = 3.0  # seconds between scans when idle
 # Safe height to travel above all objects
 SAFE_Z = 200.0
 # Height to execute the actual grasp
-GRASP_Z = 100.0
+GRASP_Z = 97.5
 # Default Home Position [X, Y, Z, Roll, Pitch, Yaw]
 HOME_POSE = [0.0, -150.0, 200.0, -180.0, 0.0, 0.0]
 TOP_VIEW_POSE = [-50.0, -150.0, 300.0, -180.0, 0.0, 0.0]

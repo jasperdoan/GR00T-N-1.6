@@ -4,7 +4,21 @@ Will be using Orbbec Gemini336 3D Camera. Maybe leverage pyorbbecsdk for all the
 
 
 
+Will need to change later, if string like "http://172.21.2.83:9988/stream.mjpg" then use what we have. Or given index like 0, 1, 2, etc... then use the pyorbbecsdk to get the depth data and color data from the camera. We need to be able to use both, depending on what was given. Maybe some form of toggle like local/stream. If local, then use the pyorbbecsdk to get the depth data and color data from the camera since the camera is physically connected to the computer. If stream, then use what we have currently where it streams the data from the camera over the network. This will be useful for testing and debugging since we can use a local camera or a remote camera depending on what is needed. Note that for streaming, we are only streaming the color data, not the depth data.
+
+
+
+Clean up vision.py, file too long. Maybe we can split it, or organize it a bit better into classes, or composite. I just want to declutter it as some functions are way too long and deserves to be split or, make helper functions that calls so it is readable and clear to programmers later on.
+
+
+
+Might need to use Yolo Model for detection instead of whatever it is right now
+
+
+
+Perception problem where it goes for not entirely center since it detects it at an angle so it sees the side, thus end up going for one of the corners. Need a way where fine tune movement goes for dead center of the object. (might need to use depth camera)
+
+---
+
+
 python3 gr00t/eval/real_robot/Lite6/auto.py --camera "http://172.21.2.83:9988/stream.mjpg"
-
-
-

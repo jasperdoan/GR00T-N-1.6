@@ -181,7 +181,7 @@ class Lite6Controller:
         if not self.arm:
             return
         print(f"[Robot] Opening gripper (dwell {GRIPPER_OPEN_DWELL_S:.1f}s for full travel)...")
-        self.arm.open_lite6_gripper()
+        self.arm.close_lite6_gripper()  # Reversed because using vacuum gripper
         if wait:
             time.sleep(GRIPPER_OPEN_DWELL_S)
             self.arm.stop_lite6_gripper()
@@ -190,7 +190,7 @@ class Lite6Controller:
         if not self.arm:
             return
         print(f"[Robot] Closing gripper (dwell {GRIPPER_CLOSE_DWELL_S:.1f}s to seat the grip)...")
-        self.arm.close_lite6_gripper()
+        self.arm.open_lite6_gripper()   # Reversed because using vacuum gripper
         if wait:
             time.sleep(GRIPPER_CLOSE_DWELL_S)
 
