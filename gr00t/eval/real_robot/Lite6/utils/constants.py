@@ -47,8 +47,8 @@ TOP_VIEW_POSE = [-50.0, -150.0, 300.0, -180.0, 0.0, 0.0]
 # --- Workspace envelope (Cartesian mm) ---
 # Reject any homography/servo target outside this box before commanding a move,
 # so a bad detection can't fault the arm by driving it out of reach.
-WORKSPACE_X_RANGE = (-180.0, 20.0)
-WORKSPACE_Y_RANGE = (-320.0, -130.0)
+WORKSPACE_X_RANGE = (-200.0, 40.0)
+WORKSPACE_Y_RANGE = (-340.0, -110.0)
 WORKSPACE_Z_RANGE = (90.0, 310.0)
 
 
