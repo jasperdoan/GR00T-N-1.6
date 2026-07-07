@@ -13,6 +13,10 @@ STOP_FLAG_PATH  = "/tmp/stop_lite6.flag"
 # --- FILE PATHS ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MATRIX_PATH = os.path.join(BASE_DIR, "data", "homography_matrix.npy")
+# Camera→robot rigid transform (R, t) solved by script/lite6_extrinsics.py.
+# When present AND the camera provides depth, SCANNING localizes the object in
+# full 3D (deprojected point cloud → base frame) instead of via the homography.
+EXTRINSICS_PATH = os.path.join(BASE_DIR, "data", "extrinsics.npz")
 # Separate output dirs so eval's before/after snapshots don't land in the auto dir.
 OUTPUT_DIR_EVAL = "gr00t/eval/real_robot/Lite6/data/outputs/GR00T-N-1.6/lite6_eval"
 OUTPUT_DIR_AUTO = "gr00t/eval/real_robot/Lite6/data/outputs/GR00T-N-1.6/lite6_auto"
@@ -169,3 +173,12 @@ MAX_RETRIES  = 2
 # --- HSV object detection (top-down) ---
 MIN_BLOB_AREA_PX      = 100
 FRONT_MIN_PRESENCE_PX = 1500
+
+# --- Depth-assisted perception (Orbbec local camera only) ---
+# The wrist camera views the cube at an angle, so the color blob includes the
+# cube's SIDE face and the 2D centroid is dragged toward it (the gripper then
+# grabs a corner). With aligned depth, side-face pixels are FARTHER from the
+# camera than top-face pixels: restrict the blob to the nearest-depth band and
+# its centroid is the TRUE top-face center.
+DEPTH_TOP_BAND_MM  = 20.0   # keep blob pixels within this depth of the nearest face
+DEPTH_MIN_VALID_PX = 50     # min valid-depth pixels in the blob to trust depth logic

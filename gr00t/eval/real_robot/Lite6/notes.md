@@ -11,12 +11,15 @@ Will need to change later, if string like "http://172.21.2.83:9988/stream.mjpg" 
 Clean up vision.py, file too long. Maybe we can split it, or organize it a bit better into classes, or composite. I just want to declutter it as some functions are way too long and deserves to be split or, make helper functions that calls so it is readable and clear to programmers later on.
 
 
+Perception problem where it goes for not entirely center since it detects it at an angle so it sees the side, thus end up going for one of the corners. Need a way where fine tune movement goes for dead center of the object. (might need to use depth camera)
+
+
+
 
 Might need to use Yolo Model for detection instead of whatever it is right now
 
 
 
-Perception problem where it goes for not entirely center since it detects it at an angle so it sees the side, thus end up going for one of the corners. Need a way where fine tune movement goes for dead center of the object. (might need to use depth camera)
 
 ---
 
