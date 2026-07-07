@@ -135,9 +135,21 @@ class OrbbecCamera:
         devices = ctx.query_devices()
         count = devices.get_count() if hasattr(devices, "get_count") else len(devices)
         if count <= index:
+            # NOTE: this index is the ORBBEC enumeration (Orbbec devices only,
+            # 0 = first Gemini), NOT the OS /dev/videoN webcam numbering — other
+            # cameras on the machine are invisible here and can't shift it.
+            listing = []
+            for i in range(count):
+                try:
+                    info = devices.get_device_by_index(i).get_device_info()
+                    listing.append(f"  [{i}] {info.get_name()} (SN {info.get_serial_number()})")
+                except Exception:
+                    listing.append(f"  [{i}] <unreadable>")
+            detected = "\n".join(listing) if listing else "  (none)"
             raise RuntimeError(
-                f"[Vision] Orbbec device index {index} not found ({count} device(s) connected). "
-                f"Is the camera plugged in and udev rules installed?"
+                f"[Vision] Orbbec device index {index} not found — {count} Orbbec device(s) detected:\n"
+                f"{detected}\n"
+                f"Is the camera plugged in and are the Orbbec udev rules installed?"
             )
         device = devices.get_device_by_index(index)
         self._pipeline = ob.Pipeline(device)

@@ -19,8 +19,6 @@ Perception problem where it goes for not entirely center since it detects it at 
 Might need to use Yolo Model for detection instead of whatever it is right now
 
 
-
-
 ---
 
 
