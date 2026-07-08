@@ -45,7 +45,7 @@ from utils.constants import (
     DEFAULT_SPEED, FINE_ADJUST_SPEED,
     YAW_ALIGN_ENABLED, CAMERA_YAW_SIGN, CAMERA_YAW_OFFSET,
     POSE_TOL_MM, POSE_TOL_DEG, MOVE_TIMEOUT_S,
-    PLACE_VARIATION_MM,
+    PLACE_VARIATION_MM, CAMERA_TO_GRIPPER_OFFSET_X, CAMERA_TO_GRIPPER_OFFSET_Y
 )
 from utils.vision import (
     SafetyMonitor,
@@ -55,6 +55,9 @@ from utils.vision import (
     check_color_presence,
     visual_servo_to_grasp,
     read_fresh,
+    load_extrinsics,
+    localize_object_3d,
+    camera_to_base,
 )
 
 
@@ -98,6 +101,10 @@ class Lite6FSM:
         self.state          = FSMState.PRE_CHECK
         self.search_retries = 0
         self.H              = load_homography()
+        # 3D localization is used when BOTH are available: a depth camera
+        # (local Orbbec) and a calibrated camera→base extrinsic. Otherwise
+        # SCANNING falls back to the homography path.
+        self.extrinsics     = load_extrinsics() if getattr(cap, "has_depth", False) else None
         self._target_x      = None
         self._target_y      = None
 
@@ -281,11 +288,53 @@ class Lite6FSM:
             print(f"[PRE_CHECK PASSED] {px_count} px in {self.source_zone}. Proceeding.")
             self.state = FSMState.SCANNING
 
+    def _localize_3d(self, frame_rgb):
+        """
+        Depth-based localization: top-face point cloud median → camera frame →
+        base frame via the calibrated extrinsic. Returns (x, y) mm or None.
+        """
+        if self.extrinsics is None:
+            return None
+        intr = getattr(self.cap, "intrinsics", None)
+        if intr is None:
+            return None
+        ret, depth_mm = self.cap.read_depth()
+        if not ret:
+            return None
+
+        color_name = self.target_object.split()[0].lower()
+        p_cam = localize_object_3d(frame_rgb, depth_mm, color_name, intr)
+        if p_cam is None:
+            return None
+
+        tcp = self.robot.get_current_position()
+        if tcp is None:
+            return None
+        R, t = self.extrinsics
+        p_base = camera_to_base(p_cam, tcp[:3], R, t)
+        print(f"[SCANNING] 3D localization: camera ({p_cam[0]:.0f}, {p_cam[1]:.0f}, {p_cam[2]:.0f}) "
+              f"→ base ({p_base[0]:.1f}, {p_base[1]:.1f}, {p_base[2]:.1f}) mm "
+              f"[object top height {p_base[2]:.1f}]")
+        return float(p_base[0]), float(p_base[1])
+
+    def _localize_homography(self, frame_rgb):
+        """2D homography localization (top-view calibrated). Returns (x, y) mm or None."""
+        if self.H is None:
+            return None
+        color_name = self.target_object.split()[0].lower()
+        centroid = find_object_centroid(frame_rgb, color_name)
+        if centroid is None:
+            return None
+        u, v = centroid
+        rob_x, rob_y = pixel_to_robot(u, v, self.H)
+        print(f"[SCANNING] Homography: pixel ({u}, {v}) → robot ({rob_x:.1f}, {rob_y:.1f}) mm")
+        return rob_x, rob_y
+
     def _handle_scanning(self):
         print("\n─── [FSM: SCANNING] Top-down detection ──────────────────────")
 
-        if self.H is None:
-            print("[SCANNING] No homography matrix — cannot localise object.")
+        if self.H is None and self.extrinsics is None:
+            print("[SCANNING] No homography and no extrinsics — cannot localise object.")
             self.state = FSMState.FAILED
             return
 
@@ -295,10 +344,12 @@ class Lite6FSM:
             self.state = FSMState.FAILED
             return
 
-        color_name = self.target_object.split()[0].lower()
-        centroid = find_object_centroid(frame_rgb, color_name)
+        # Prefer depth-based 3D localization; fall back to the homography.
+        target = self._localize_3d(frame_rgb)
+        if target is None:
+            target = self._localize_homography(frame_rgb)
 
-        if centroid is None:
+        if target is None:
             if self._fail_or_retry("Could not locate object in top-down view"):
                 self.robot.wrist_wiggle()
                 self.state = FSMState.FAILED
@@ -306,9 +357,7 @@ class Lite6FSM:
                 time.sleep(1.0)
             return
 
-        u, v = centroid
-        rob_x, rob_y = pixel_to_robot(u, v, self.H)
-        print(f"[SCANNING] Object at pixel ({u}, {v}) → robot ({rob_x:.1f}, {rob_y:.1f}) mm")
+        rob_x, rob_y = target
 
         if not self.robot.in_workspace(rob_x, rob_y, SAFE_Z):
             if self._fail_or_retry("Mapped target outside workspace envelope"):
@@ -343,6 +392,8 @@ class Lite6FSM:
             timeout=self.vla_timeout,
             safety_monitor=self.safety_monitor,
             should_stop_cb=self.should_stop_cb,
+            intrinsics=getattr(self.cap, "intrinsics", None),
+            extrinsics=self.extrinsics,
         )
         if not locked:
             if self._fail_or_retry("Visual servoing failed to lock"):
@@ -356,40 +407,34 @@ class Lite6FSM:
         if pos is None:
             self.state = FSMState.FAILED
             return
-        grasp_x, grasp_y = pos[0], pos[1]
+            
+        # 1. Apply mechanical offset to line up the physical gripper
+        grasp_x = pos[0] + CAMERA_TO_GRIPPER_OFFSET_X
+        grasp_y = pos[1] + CAMERA_TO_GRIPPER_OFFSET_Y
 
-        # Yaw-align the jaws to the object. A pure yaw rotation about the TCP
-        # keeps the gripper over the object (only the camera view moves, and we
-        # no longer need the camera from here on).
-        grasp_yaw = 0.0
+        # 2. Determine target yaw
+        grasp_yaw = pos[5]  # Default to current yaw (usually 0.0)
         if YAW_ALIGN_ENABLED and obj_angle is not None and abs(obj_angle) > 1.0:
             grasp_yaw = CAMERA_YAW_SIGN * obj_angle + CAMERA_YAW_OFFSET
-            print(f"[FINE_GRASP] Object rotated {obj_angle:.1f}° — aligning gripper yaw to {grasp_yaw:.1f}°.")
-            if not self._safe_move(grasp_x, grasp_y, pos[2], yaw=grasp_yaw,
-                                   speed=FINE_ADJUST_SPEED, interruptible=False):
-                if self._fail_or_retry("Yaw alignment move failed"):
-                    self.state = FSMState.FAILED
-                else:
-                    self._safe_move(*HOME_POSE[:3])
-                    self.state = FSMState.SCANNING
-                return
+            
+        print(f"[FINE_GRASP] Object centered. Target Move -> "
+              f"Offset: ({CAMERA_TO_GRIPPER_OFFSET_X}, {CAMERA_TO_GRIPPER_OFFSET_Y}) mm "
+              f"| Descend: Z={GRASP_Z} | Yaw: {grasp_yaw:.1f}°")
 
-        print(f"[FINE_GRASP] Descending to Z={GRASP_Z} (yaw={grasp_yaw:.1f}°)...")
+        # 3. ONE SIMULTANEOUS MOTION: Move X, Y, Z, and Yaw simultaneously!
         if not self._safe_move(grasp_x, grasp_y, GRASP_Z, yaw=grasp_yaw,
                                speed=FINE_ADJUST_SPEED, interruptible=False):
-            if self._fail_or_retry("Descent to grasp failed"):
+            if self._fail_or_retry("Combined descent/alignment move failed"):
                 self.state = FSMState.FAILED
             else:
                 self._safe_move(*HOME_POSE[:3])
                 self.state = FSMState.SCANNING
             return
 
-        # No camera confirmation possible here — the object is not visible in
-        # the wrist camera once gripped. The servo's centroid lock plus the
-        # Lite6's repeatability carry the grasp; VERIFY catches a miss.
+        # 4. Perform Grasp
         self.robot.close_gripper()
 
-        print(f"[FINE_GRASP] Lifting to Z={SAFE_Z} (keeping yaw until clear of table)...")
+        print(f"[FINE_GRASP] Lifting to Z={SAFE_Z} (keeping yaw {grasp_yaw:.1f}° until clear)...")
         if not self._safe_move(grasp_x, grasp_y, SAFE_Z, yaw=grasp_yaw,
                                speed=FINE_ADJUST_SPEED, interruptible=False):
             self.state = FSMState.RECOVERY

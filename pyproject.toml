@@ -33,6 +33,7 @@ dependencies = [
     "wandb==0.23.0",
     "pyzmq==27.0.1",
     "xarm-python-sdk==1.18.4",
+    "pyorbbecsdk2==2.1.1",
 ]
 
 [project.optional-dependencies]

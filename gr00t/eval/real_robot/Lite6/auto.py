@@ -8,6 +8,7 @@ check_back), then runs the FSM and loops. Ctrl+C for graceful shutdown.
 """
 
 import argparse
+import sys
 import time
 
 import cv2
@@ -21,14 +22,15 @@ from utils.constants import (
     OUTPUT_DIR_AUTO,
     SCAN_INTERVAL,
     VLA_TIMEOUT,
+    KNOWN_OBJECTS,
 )
 from utils.system  import setup_signal_handlers, clear_stop_flag, set_in_use, clear_in_use, is_stop_requested
-from utils.vision  import SafetyMonitor, check_color_presence, save_workspace_snapshot, open_camera, read_fresh
+from utils.vision  import SafetyMonitor, check_color_presence, save_workspace_snapshot, open_camera, read_fresh, RunRecorder
 from utils.robot   import Lite6Controller
 from utils.fsm     import Lite6FSM, FSMState
 from utils.nlp     import TASK_ZONE_MAP
 
-# Object the auto loop sorts. Could be extended to iterate KNOWN_OBJECTS.
+# Default object the auto loop sorts; override per-run with --object.
 AUTO_TARGET = "red cube"
 
 
@@ -52,15 +54,26 @@ def main():
     parser = argparse.ArgumentParser(description="Lite6 Auto — continuous autonomous loop")
     parser.add_argument("--ip",        type=str,   default=DEFAULT_IP)
     parser.add_argument("--camera",    type=str,   default=None,
-                        help="Camera source override: device index (e.g. 0) or stream URL")
+                        help="Camera source override: Orbbec device index (e.g. 0) or stream URL")
+    parser.add_argument("--object",    type=str,   default=AUTO_TARGET,
+                        help=f"Object to sort (must be in KNOWN_OBJECTS; default: {AUTO_TARGET!r})")
     parser.add_argument("--timeout",   type=float, default=VLA_TIMEOUT)
     parser.add_argument("--retries",   type=int,   default=2)
     parser.add_argument("--no-safety", action="store_true")
+    parser.add_argument("--video",     action="store_true",
+                        help="Record a 2x2 debug mosaic MP4 (color+detection | depth | masks) during the run")
     args = parser.parse_args()
 
     camera_source = CAMERA_SOURCE
     if args.camera is not None:
         camera_source = int(args.camera) if args.camera.isdigit() else args.camera
+
+    target_object = args.object.strip().lower()
+    if target_object not in KNOWN_OBJECTS:
+        print(f"Unknown object {args.object!r}. Known objects:")
+        for obj in KNOWN_OBJECTS:
+            print(f"  - {obj}")
+        sys.exit(1)
 
     setup_signal_handlers()
     clear_stop_flag()
@@ -71,10 +84,12 @@ def main():
     print("=======================================================\n")
 
     cap = None
-    robot = safety_monitor = None
+    robot = safety_monitor = recorder = None
     try:
         # Single physical camera (wrist), reused for the top-down view at TOP_VIEW_POSE.
         cap = open_camera(camera_source, "wrist camera")
+        if args.video:
+            recorder = RunRecorder(cap, target_object, OUTPUT_DIR_AUTO)
 
         robot = Lite6Controller(args.ip)
         robot.connect()
@@ -97,19 +112,19 @@ def main():
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
             save_workspace_snapshot(frame_rgb, "snapshot_auto_front_before.jpg",
-                                    AUTO_TARGET, OUTPUT_DIR_AUTO, ALL_ZONES_DICT)
+                                    target_object, OUTPUT_DIR_AUTO, ALL_ZONES_DICT)
 
-            task_type, source_zone, target_zone = detect_next_task(frame_rgb)
+            task_type, source_zone, target_zone = detect_next_task(frame_rgb, target_object)
             if task_type is None:
-                print(f"[AUTO] '{AUTO_TARGET}' not found in any zone. Sleeping {SCAN_INTERVAL}s...")
+                print(f"[AUTO] '{target_object}' not found in any zone. Sleeping {SCAN_INTERVAL}s...")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            print(f"\n[AUTO] Task: {task_type.upper()}  |  Object: {AUTO_TARGET}")
+            print(f"\n[AUTO] Task: {task_type.upper()}  |  Object: {target_object}")
 
             fsm = Lite6FSM(
                 robot=robot, cap=cap,
-                task_type=task_type, target_object=AUTO_TARGET,
+                task_type=task_type, target_object=target_object,
                 source_zone=source_zone, target_zone=target_zone,
                 vla_timeout=args.timeout, max_retries=args.retries,
                 safety_monitor=safety_monitor, should_stop_cb=is_stop_requested,
@@ -122,7 +137,7 @@ def main():
             if ret:
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 save_workspace_snapshot(frame_rgb, "snapshot_auto_front_after.jpg",
-                                        AUTO_TARGET, OUTPUT_DIR_AUTO, ALL_ZONES_DICT)
+                                        target_object, OUTPUT_DIR_AUTO, ALL_ZONES_DICT)
             robot.move_to(*HOME_POSE[:3])
             time.sleep(1.0)
 
@@ -138,6 +153,8 @@ def main():
         print(f"\n[AUTO] Fatal: {e}")
     finally:
         print("\n[AUTO] Cleaning up...")
+        if recorder is not None:
+            recorder.stop()
         if safety_monitor is not None:
             safety_monitor.stop()
         if robot is not None:
