@@ -41,7 +41,7 @@ SCAN_INTERVAL = 3.0  # seconds between scans when idle
 
 # --- Robot Poses & Heights (Cartesian mm) ---
 # Safe height to travel above all objects
-SAFE_Z = 200.0
+SAFE_Z = 300.0
 # Height to execute the actual grasp
 GRASP_Z = 95.5
 # Default Home Position [X, Y, Z, Roll, Pitch, Yaw]
@@ -106,7 +106,7 @@ COLOR_RANGES = {
 # changed the pixel error by (+29, +42) px → true scale at hover ≈ 0.175 mm/px,
 # while H predicts ≈ 0.39 mm/px — a 2.2x overestimate. Effective per-step
 # fraction = SERVO_GAIN × 2.2, so 0.22 here ≈ 0.5 real (stable, no overshoot).
-SERVO_GAIN = 0.22             # fraction of the homography-mapped error per step
+SERVO_GAIN = 0.10             # fraction of the homography-mapped error per step
 MAX_SERVO_STEP_MM = 8.0       # clamp per-iteration delta so a big initial error
                               # can't command an overshoot at FINE_ADJUST_SPEED
 SERVO_DEADBAND_PX = 3         # ignore sub-pixel jitter below this error
@@ -134,13 +134,13 @@ MOVE_TIMEOUT_S = 30.0   # give up (and fail the move) after this long
 # axis-aligned bbox is rotation-DEPENDENT: a 45°-rotated cube's bbox inflates
 # by √2 (observed 196×176 vs straight 150×130) and exactly matched the ROI
 # height, making containment unsatisfiable → the servo spun until timeout.
-GRIPPER_ROI = (553, 553, 238, 176)   # (x, y, w, h) in wrist-cam pixels
+GRIPPER_ROI = (540, 260, 200, 200)   # (x, y, w, h) in wrist-cam pixels
 
 # LOCK criterion (rotation-invariant): blob CENTROID within this many pixels of
 # the ROI center, per axis. 8 px ≈ 1.4 mm at the measured 0.175 mm/px hover
 # scale. Centroid detection at dead center is reliable since the red V-floor
 # shadow fix (hardware log: err (0,+2) stable for ~60 frames).
-CENTER_LOCK_TOL_PX = 8
+CENTER_LOCK_TOL_PX = 15
 
 # Consecutive frames the centroid must hold within tolerance to lock the servo
 # (HSV mask edges flicker ~1-2 px; a single strict frame would chatter).
@@ -180,7 +180,7 @@ FRONT_MIN_PRESENCE_PX = 1500
 # grabs a corner). With aligned depth, side-face pixels are FARTHER from the
 # camera than top-face pixels: restrict the blob to the nearest-depth band and
 # its centroid is the TRUE top-face center.
-DEPTH_TOP_BAND_MM  = 20.0   # keep blob pixels within this depth of the nearest face
+DEPTH_TOP_BAND_MM  = 30.0   # keep blob pixels within this depth of the nearest face
 DEPTH_MIN_VALID_PX = 50     # min valid-depth pixels in the blob to trust depth logic
 
 # Fragment fusion: the HSV mask splits on real cubes (top vs side face at the
@@ -192,12 +192,16 @@ MASK_FUSE_KERNEL_PX = 15
 # Height-above-table gate: with depth, object candidates must rise at least
 # this far off the table plane (robust far plane of the depth image). Excludes
 # table-level phantoms (reflections/stains/shadows) no matter how red they look.
-OBJECT_MIN_HEIGHT_MM = 15.0
+OBJECT_MIN_HEIGHT_MM = 5.0
 
 # 3D metric servo gain: with depth + intrinsics + extrinsics the pixel error
 # converts to EXACT base-frame mm (no homography scale guess), so the gain can
 # run high; < 1 only damps sensor noise.
-SERVO_GAIN_3D = 0.8
+SERVO_GAIN_3D = 0.35
 
 # --- Debug/demo video recording (--video flag) ---
 VIDEO_FPS = 10   # mosaic recording rate; recorder runs in its own thread
+
+
+CAMERA_TO_GRIPPER_OFFSET_X = -70.0
+CAMERA_TO_GRIPPER_OFFSET_Y = 0.0

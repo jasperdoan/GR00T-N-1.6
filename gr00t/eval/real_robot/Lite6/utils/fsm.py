@@ -45,7 +45,7 @@ from utils.constants import (
     DEFAULT_SPEED, FINE_ADJUST_SPEED,
     YAW_ALIGN_ENABLED, CAMERA_YAW_SIGN, CAMERA_YAW_OFFSET,
     POSE_TOL_MM, POSE_TOL_DEG, MOVE_TIMEOUT_S,
-    PLACE_VARIATION_MM,
+    PLACE_VARIATION_MM, CAMERA_TO_GRIPPER_OFFSET_X, CAMERA_TO_GRIPPER_OFFSET_Y
 )
 from utils.vision import (
     SafetyMonitor,
@@ -407,40 +407,34 @@ class Lite6FSM:
         if pos is None:
             self.state = FSMState.FAILED
             return
-        grasp_x, grasp_y = pos[0], pos[1]
+            
+        # 1. Apply mechanical offset to line up the physical gripper
+        grasp_x = pos[0] + CAMERA_TO_GRIPPER_OFFSET_X
+        grasp_y = pos[1] + CAMERA_TO_GRIPPER_OFFSET_Y
 
-        # Yaw-align the jaws to the object. A pure yaw rotation about the TCP
-        # keeps the gripper over the object (only the camera view moves, and we
-        # no longer need the camera from here on).
-        grasp_yaw = 0.0
+        # 2. Determine target yaw
+        grasp_yaw = pos[5]  # Default to current yaw (usually 0.0)
         if YAW_ALIGN_ENABLED and obj_angle is not None and abs(obj_angle) > 1.0:
             grasp_yaw = CAMERA_YAW_SIGN * obj_angle + CAMERA_YAW_OFFSET
-            print(f"[FINE_GRASP] Object rotated {obj_angle:.1f}° — aligning gripper yaw to {grasp_yaw:.1f}°.")
-            if not self._safe_move(grasp_x, grasp_y, pos[2], yaw=grasp_yaw,
-                                   speed=FINE_ADJUST_SPEED, interruptible=False):
-                if self._fail_or_retry("Yaw alignment move failed"):
-                    self.state = FSMState.FAILED
-                else:
-                    self._safe_move(*HOME_POSE[:3])
-                    self.state = FSMState.SCANNING
-                return
+            
+        print(f"[FINE_GRASP] Object centered. Target Move -> "
+              f"Offset: ({CAMERA_TO_GRIPPER_OFFSET_X}, {CAMERA_TO_GRIPPER_OFFSET_Y}) mm "
+              f"| Descend: Z={GRASP_Z} | Yaw: {grasp_yaw:.1f}°")
 
-        print(f"[FINE_GRASP] Descending to Z={GRASP_Z} (yaw={grasp_yaw:.1f}°)...")
+        # 3. ONE SIMULTANEOUS MOTION: Move X, Y, Z, and Yaw simultaneously!
         if not self._safe_move(grasp_x, grasp_y, GRASP_Z, yaw=grasp_yaw,
                                speed=FINE_ADJUST_SPEED, interruptible=False):
-            if self._fail_or_retry("Descent to grasp failed"):
+            if self._fail_or_retry("Combined descent/alignment move failed"):
                 self.state = FSMState.FAILED
             else:
                 self._safe_move(*HOME_POSE[:3])
                 self.state = FSMState.SCANNING
             return
 
-        # No camera confirmation possible here — the object is not visible in
-        # the wrist camera once gripped. The servo's centroid lock plus the
-        # Lite6's repeatability carry the grasp; VERIFY catches a miss.
+        # 4. Perform Grasp
         self.robot.close_gripper()
 
-        print(f"[FINE_GRASP] Lifting to Z={SAFE_Z} (keeping yaw until clear of table)...")
+        print(f"[FINE_GRASP] Lifting to Z={SAFE_Z} (keeping yaw {grasp_yaw:.1f}° until clear)...")
         if not self._safe_move(grasp_x, grasp_y, SAFE_Z, yaw=grasp_yaw,
                                speed=FINE_ADJUST_SPEED, interruptible=False):
             self.state = FSMState.RECOVERY
