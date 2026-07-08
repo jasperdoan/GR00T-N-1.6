@@ -392,6 +392,8 @@ class Lite6FSM:
             timeout=self.vla_timeout,
             safety_monitor=self.safety_monitor,
             should_stop_cb=self.should_stop_cb,
+            intrinsics=getattr(self.cap, "intrinsics", None),
+            extrinsics=self.extrinsics,
         )
         if not locked:
             if self._fail_or_retry("Visual servoing failed to lock"):

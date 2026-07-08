@@ -22,4 +22,15 @@ Might need to use Yolo Model for detection instead of whatever it is right now
 ---
 
 
-python3 gr00t/eval/real_robot/Lite6/auto.py --camera "http://172.21.2.83:9988/stream.mjpg"
+python3 gr00t/eval/real_robot/Lite6/auto.py --camera 0 --video
+
+
+---
+
+— Targeted validations (one run each)
+Rotated cube (~30°): should servo, yaw-align, grasp cleanly. If the gripper rotates the wrong way, flip CAMERA_YAW_SIGN to -1.0 in constants.py — that's the last unverified sign.
+
+Tunables if needed: DEPTH_TOP_BAND_MM (20 mm) — if your cube is very short or the depth is noisy at the hover height, widen/narrow this band; the self-test snapshot helps judge depth noise.
+
+
+---

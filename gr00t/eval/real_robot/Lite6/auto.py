@@ -25,7 +25,7 @@ from utils.constants import (
     KNOWN_OBJECTS,
 )
 from utils.system  import setup_signal_handlers, clear_stop_flag, set_in_use, clear_in_use, is_stop_requested
-from utils.vision  import SafetyMonitor, check_color_presence, save_workspace_snapshot, open_camera, read_fresh
+from utils.vision  import SafetyMonitor, check_color_presence, save_workspace_snapshot, open_camera, read_fresh, RunRecorder
 from utils.robot   import Lite6Controller
 from utils.fsm     import Lite6FSM, FSMState
 from utils.nlp     import TASK_ZONE_MAP
@@ -60,6 +60,8 @@ def main():
     parser.add_argument("--timeout",   type=float, default=VLA_TIMEOUT)
     parser.add_argument("--retries",   type=int,   default=2)
     parser.add_argument("--no-safety", action="store_true")
+    parser.add_argument("--video",     action="store_true",
+                        help="Record a 2x2 debug mosaic MP4 (color+detection | depth | masks) during the run")
     args = parser.parse_args()
 
     camera_source = CAMERA_SOURCE
@@ -82,10 +84,12 @@ def main():
     print("=======================================================\n")
 
     cap = None
-    robot = safety_monitor = None
+    robot = safety_monitor = recorder = None
     try:
         # Single physical camera (wrist), reused for the top-down view at TOP_VIEW_POSE.
         cap = open_camera(camera_source, "wrist camera")
+        if args.video:
+            recorder = RunRecorder(cap, target_object, OUTPUT_DIR_AUTO)
 
         robot = Lite6Controller(args.ip)
         robot.connect()
@@ -149,6 +153,8 @@ def main():
         print(f"\n[AUTO] Fatal: {e}")
     finally:
         print("\n[AUTO] Cleaning up...")
+        if recorder is not None:
+            recorder.stop()
         if safety_monitor is not None:
             safety_monitor.stop()
         if robot is not None:

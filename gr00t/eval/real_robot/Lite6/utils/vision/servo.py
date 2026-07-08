@@ -25,8 +25,11 @@ from typing import Optional, Tuple
 
 import cv2
 
+import numpy as np
+
 from utils.constants import (
     SERVO_GAIN,
+    SERVO_GAIN_3D,
     MAX_SERVO_STEP_MM,
     SERVO_DEADBAND_PX,
     GRIPPER_ROI,
@@ -42,6 +45,7 @@ from utils.vision.helpers import clamp
 from utils.vision.camera import read_fresh
 from utils.vision.detection import find_object_blob
 from utils.vision.homography import pixel_to_robot
+from utils.vision.localize3d import deproject
 from utils.vision.safety import SafetyMonitor
 
 
@@ -74,6 +78,37 @@ def _read_depth_if_available(cap):
     return None
 
 
+def _robust_depth_at(depth_mm, u: int, v: int, half: int = 4):
+    """Median valid depth in a small patch around (u, v); None if unusable."""
+    if depth_mm is None:
+        return None
+    h, w = depth_mm.shape[:2]
+    y0, y1 = max(0, v - half), min(h, v + half + 1)
+    x0, x1 = max(0, u - half), min(w, u + half + 1)
+    patch = depth_mm[y0:y1, x0:x1]
+    valid = patch[np.isfinite(patch) & (patch > 0)]
+    if valid.size < 5:
+        return None
+    return float(np.median(valid))
+
+
+def _metric_step(obj_px, aim_px, depth_mm, intrinsics, extrinsics):
+    """
+    Exact base-frame XY step from pixel error using depth + calibration:
+        Δ_base = R @ (deproject(obj) − deproject(aim))     [same depth plane]
+    Direction AND scale are calibration-true, so no homography scale guess.
+    Returns (dx, dy) in mm or None when depth at the object is unusable.
+    """
+    d = _robust_depth_at(depth_mm, obj_px[0], obj_px[1])
+    if d is None:
+        return None
+    p_obj = deproject(obj_px[0], obj_px[1], d, intrinsics)
+    p_aim = deproject(aim_px[0], aim_px[1], d, intrinsics)
+    R, _t = extrinsics
+    delta = R @ (p_obj - p_aim)
+    return float(delta[0]), float(delta[1])
+
+
 def visual_servo_to_grasp(
     cap,
     robot,
@@ -82,6 +117,8 @@ def visual_servo_to_grasp(
     timeout: float = 15.0,
     safety_monitor: Optional[SafetyMonitor] = None,
     should_stop_cb=None,
+    intrinsics=None,
+    extrinsics=None,
 ) -> Tuple[bool, Optional[float]]:
     """
     Returns (locked, angle_deg):
@@ -89,16 +126,21 @@ def visual_servo_to_grasp(
       - angle_deg: the object's in-image rotation ([-45, 45), from the LAST
         confirmation frame) so the caller can yaw-align the gripper without
         another camera read. None when not locked.
+
+    Step mapping: with intrinsics + extrinsics + depth (Orbbec runs), pixel
+    error converts to an EXACT base-frame delta (SERVO_GAIN_3D). Without them
+    (stream runs), the homography-direction step (SERVO_GAIN) is used.
     """
-    if H is None:
-        print("[Vision] No homography — cannot map pixel error to robot frame.")
+    use_3d = intrinsics is not None and extrinsics is not None
+    if H is None and not use_3d:
+        print("[Vision] No homography and no 3D calibration — cannot map pixel error.")
         return False, None
 
     color_name = target_object.split()[0].lower()
     rx, ry, rw, rh = GRIPPER_ROI
     aim_x = rx + rw // 2
     aim_y = ry + rh // 2
-    aim_robot = pixel_to_robot(aim_x, aim_y, H)
+    aim_robot = pixel_to_robot(aim_x, aim_y, H) if H is not None else None
 
     start_time = time.time()
     confirm_count = 0
@@ -254,14 +296,25 @@ def visual_servo_to_grasp(
             time.sleep(0.033)
             continue
 
-        # Homography-mapped P-step: the displacement that puts the object at
-        # the aim pixel is H(p_obj) − H(p_aim) (a camera translating by Δ
-        # shifts image content by −Δ). Damped by SERVO_GAIN (annealed by the
-        # loss backoff), bounded by the step clamp.
-        obj_robot = pixel_to_robot(cmd_x, cmd_y, H)
-        gain = SERVO_GAIN * loss_backoff
-        dx = clamp(gain * (obj_robot[0] - aim_robot[0]), MAX_SERVO_STEP_MM)
-        dy = clamp(gain * (obj_robot[1] - aim_robot[1]), MAX_SERVO_STEP_MM)
+        # Step mapping, best available first:
+        #   3D metric (depth + intrinsics + extrinsics): exact base-frame delta.
+        #   Homography direction (stream mode): direction exact, scale damped.
+        # Both annealed by the loss backoff and bounded by the step clamp.
+        step = None
+        if use_3d and depth_mm is not None:
+            step = _metric_step((cmd_x, cmd_y), (aim_x, aim_y), depth_mm, intrinsics, extrinsics)
+            if step is not None:
+                gain = SERVO_GAIN_3D * loss_backoff
+                dx = clamp(gain * step[0], MAX_SERVO_STEP_MM)
+                dy = clamp(gain * step[1], MAX_SERVO_STEP_MM)
+        if step is None:
+            if aim_robot is None:
+                time.sleep(0.033)   # 3D-only run with momentary bad depth: retry
+                continue
+            obj_robot = pixel_to_robot(cmd_x, cmd_y, H)
+            gain = SERVO_GAIN * loss_backoff
+            dx = clamp(gain * (obj_robot[0] - aim_robot[0]), MAX_SERVO_STEP_MM)
+            dy = clamp(gain * (obj_robot[1] - aim_robot[1]), MAX_SERVO_STEP_MM)
 
         # Nothing meaningful to command (dead-banded to ~zero): don't spam the
         # controller with no-op moves; just re-read.

@@ -35,6 +35,7 @@ from utils.vision.detection import (       # noqa: F401
     blob_inside_roi,
     color_mask_of,
     top_face_mask,
+    height_gate_mask,
 )
 from utils.vision.servo import (           # noqa: F401
     visual_servo_to_grasp,
@@ -49,4 +50,7 @@ from utils.vision.localize3d import (      # noqa: F401
     save_extrinsics,
     load_extrinsics,
     camera_to_base,
+)
+from utils.vision.recorder import (        # noqa: F401
+    RunRecorder,
 )

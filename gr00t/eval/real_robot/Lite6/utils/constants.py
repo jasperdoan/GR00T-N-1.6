@@ -43,7 +43,7 @@ SCAN_INTERVAL = 3.0  # seconds between scans when idle
 # Safe height to travel above all objects
 SAFE_Z = 200.0
 # Height to execute the actual grasp
-GRASP_Z = 97.5
+GRASP_Z = 95.5
 # Default Home Position [X, Y, Z, Roll, Pitch, Yaw]
 HOME_POSE = [0.0, -150.0, 200.0, -180.0, 0.0, 0.0]
 TOP_VIEW_POSE = [-50.0, -150.0, 300.0, -180.0, 0.0, 0.0]
@@ -134,7 +134,7 @@ MOVE_TIMEOUT_S = 30.0   # give up (and fail the move) after this long
 # axis-aligned bbox is rotation-DEPENDENT: a 45°-rotated cube's bbox inflates
 # by √2 (observed 196×176 vs straight 150×130) and exactly matched the ROI
 # height, making containment unsatisfiable → the servo spun until timeout.
-GRIPPER_ROI = (594, 563, 210, 176)   # (x, y, w, h) in wrist-cam pixels
+GRIPPER_ROI = (553, 553, 238, 176)   # (x, y, w, h) in wrist-cam pixels
 
 # LOCK criterion (rotation-invariant): blob CENTROID within this many pixels of
 # the ROI center, per axis. 8 px ≈ 1.4 mm at the measured 0.175 mm/px hover
@@ -182,3 +182,22 @@ FRONT_MIN_PRESENCE_PX = 1500
 # its centroid is the TRUE top-face center.
 DEPTH_TOP_BAND_MM  = 20.0   # keep blob pixels within this depth of the nearest face
 DEPTH_MIN_VALID_PX = 50     # min valid-depth pixels in the blob to trust depth logic
+
+# Fragment fusion: the HSV mask splits on real cubes (top vs side face at the
+# lit edge — hardware snapshot showed TWO 'red cube' boxes on one cube), and
+# largest-contour selection then flip-flops between fragments, making the
+# servo chase a teleporting centroid. CLOSE with this kernel re-fuses them.
+MASK_FUSE_KERNEL_PX = 15
+
+# Height-above-table gate: with depth, object candidates must rise at least
+# this far off the table plane (robust far plane of the depth image). Excludes
+# table-level phantoms (reflections/stains/shadows) no matter how red they look.
+OBJECT_MIN_HEIGHT_MM = 15.0
+
+# 3D metric servo gain: with depth + intrinsics + extrinsics the pixel error
+# converts to EXACT base-frame mm (no homography scale guess), so the gain can
+# run high; < 1 only damps sensor noise.
+SERVO_GAIN_3D = 0.8
+
+# --- Debug/demo video recording (--video flag) ---
+VIDEO_FPS = 10   # mosaic recording rate; recorder runs in its own thread

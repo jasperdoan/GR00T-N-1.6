@@ -19,7 +19,7 @@ from utils.constants import (
 )
 from utils.system  import setup_signal_handlers, clear_stop_flag, set_in_use, clear_in_use, is_stop_requested
 from utils.nlp     import parse_instruction
-from utils.vision  import SafetyMonitor, save_workspace_snapshot, open_camera, read_fresh
+from utils.vision  import SafetyMonitor, save_workspace_snapshot, open_camera, read_fresh, RunRecorder
 from utils.robot   import Lite6Controller
 from utils.fsm     import Lite6FSM, FSMState
 
@@ -44,6 +44,8 @@ def main():
     parser.add_argument("--timeout",   type=float, default=VLA_TIMEOUT, help="Visual servoing timeout (s)")
     parser.add_argument("--retries",   type=int,   default=2,    help="Max retries on failure")
     parser.add_argument("--no-safety", action="store_true",      help="Disable hand detection safety")
+    parser.add_argument("--video",     action="store_true",
+                        help="Record a 2x2 debug mosaic MP4 (color+detection | depth | masks) during the run")
     args = parser.parse_args()
 
     camera_source = CAMERA_SOURCE
@@ -69,10 +71,12 @@ def main():
     print(f"[EVAL] Target zone   : {target_zone}\n")
 
     cap = None
-    robot = safety_monitor = None
+    robot = safety_monitor = recorder = None
     try:
         # Single physical camera (wrist), reused for the top-down view at TOP_VIEW_POSE.
         cap = open_camera(camera_source, "wrist camera")
+        if args.video:
+            recorder = RunRecorder(cap, target_object, OUTPUT_DIR_EVAL)
 
         robot = Lite6Controller(args.ip)
         robot.connect()                       # raises on failure — no blind runs
@@ -107,6 +111,8 @@ def main():
         print(f"\n[EVAL] Fatal: {e}")
     finally:
         print("\n[EVAL] Cleaning up...")
+        if recorder is not None:
+            recorder.stop()
         if safety_monitor is not None:
             safety_monitor.stop()
         if robot is not None:

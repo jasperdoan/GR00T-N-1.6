@@ -21,8 +21,21 @@ from utils.constants import (
     FRONT_MIN_PRESENCE_PX,
     DEPTH_TOP_BAND_MM,
     DEPTH_MIN_VALID_PX,
+    MASK_FUSE_KERNEL_PX,
+    OBJECT_MIN_HEIGHT_MM,
 )
 from utils.vision.helpers import enhance_saturation, clean_mask, to_bgr
+
+
+def _fuse_fragments(mask: np.ndarray) -> np.ndarray:
+    """
+    Morphological CLOSE to re-fuse a mask that split across the object (the HSV
+    mask fragments at the lit edge between a cube's top and side faces; the
+    largest-contour pick then flip-flops between fragments frame to frame,
+    which made the servo chase a teleporting centroid on hardware).
+    """
+    kernel = np.ones((MASK_FUSE_KERNEL_PX, MASK_FUSE_KERNEL_PX), np.uint8)
+    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
 
 def build_color_mask(hsv_img: np.ndarray, color_name: str) -> np.ndarray:
@@ -32,7 +45,32 @@ def build_color_mask(hsv_img: np.ndarray, color_name: str) -> np.ndarray:
     mask = np.zeros(hsv_img.shape[:2], dtype=np.uint8)
     for lower, upper in ranges:
         mask |= cv2.inRange(hsv_img, np.array(lower, dtype=np.uint8), np.array(upper, dtype=np.uint8))
-    return clean_mask(mask)
+    return _fuse_fragments(clean_mask(mask))
+
+
+def height_gate_mask(mask: np.ndarray, depth_mm: Optional[np.ndarray]) -> np.ndarray:
+    """
+    Keep only mask pixels that rise at least OBJECT_MIN_HEIGHT_MM off the table.
+    The table is the robust FAR plane of the depth image (90th percentile of
+    valid depths — the table dominates the frame at hover/top view). This is
+    per-pixel point-cloud reasoning: reflections, stains and shadows sit AT
+    table depth and are physically excluded no matter how red they look.
+    Falls back to the input mask when depth is missing/insufficient.
+    """
+    if depth_mm is None or depth_mm.shape[:2] != mask.shape[:2]:
+        return mask
+
+    valid = depth_mm[np.isfinite(depth_mm) & (depth_mm > 0)]
+    if valid.size < 1000:
+        return mask
+    table_d = float(np.percentile(valid, 90))
+
+    raised = np.isfinite(depth_mm) & (depth_mm > 0) & (depth_mm < table_d - OBJECT_MIN_HEIGHT_MM)
+    gated = np.zeros_like(mask)
+    gated[(mask > 0) & raised] = 255
+    if int((gated > 0).sum()) < DEPTH_MIN_VALID_PX:
+        return mask   # object too flat / depth too sparse — don't lose it entirely
+    return _fuse_fragments(gated)
 
 
 def color_mask_of(frame: np.ndarray, color_name: str) -> np.ndarray:
@@ -111,20 +149,24 @@ def find_object_blob(frame: np.ndarray, color_name: str, depth_mm: Optional[np.n
         (cx, cy, (bx, by, bw, bh), angle_deg)
     for the largest color blob, or None if not found.
 
-    When aligned depth is provided, centroid/angle are computed over the
-    TOP-FACE submask (nearest-depth band) so an angled view of the cube's side
-    can't drag the aim point toward a corner. The bounding box still describes
-    the full color blob (useful for diagnostics/overlays).
+    When aligned depth is provided, the mask is first HEIGHT-GATED (only pixels
+    that rise off the table survive — kills table-level phantoms), then the
+    centroid/angle are computed over the TOP-FACE submask (nearest-depth band)
+    so an angled view of the cube's side can't drag the aim point toward a
+    corner. The bounding box describes the gated blob (diagnostics/overlays).
     """
-    full_mask = color_mask_of(frame, color_name)
-    full_contour = _largest_contour(full_mask)
-    if full_contour is None:
-        return None
-    bbox = cv2.boundingRect(full_contour)
-
-    contour = full_contour
+    mask = color_mask_of(frame, color_name)
     if depth_mm is not None:
-        refined = top_face_mask(full_mask, depth_mm)
+        mask = height_gate_mask(mask, depth_mm)
+
+    blob_contour = _largest_contour(mask)
+    if blob_contour is None:
+        return None
+    bbox = cv2.boundingRect(blob_contour)
+
+    contour = blob_contour
+    if depth_mm is not None:
+        refined = top_face_mask(mask, depth_mm)
         top_contour = _largest_contour(refined)
         if top_contour is not None:
             contour = top_contour
