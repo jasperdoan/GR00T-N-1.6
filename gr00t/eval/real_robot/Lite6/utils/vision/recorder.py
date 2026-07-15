@@ -24,12 +24,12 @@ from datetime import datetime
 import cv2
 import numpy as np
 
-from utils.constants import GRIPPER_ROI, VIDEO_FPS
+from utils.constants import VIDEO_FPS
 from utils.vision.detection import (
     color_mask_of,
     height_gate_mask,
     top_face_mask,
-    find_object_blob,
+    find_all_blobs,
 )
 
 _PANEL_W, _PANEL_H = 640, 360
@@ -152,20 +152,21 @@ class RunRecorder:
     def _compose(self, frame_bgr, depth_mm):
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
-        # [A] Annotated color
+        # [A] Annotated color — ALL candidate blobs, not just the largest (the
+        # servo's world-frame matcher decides which one is the target; its own
+        # log prints the matched distance). One box per cube = honest video.
+        # (No aim-ROI overlay: PBVS has no aim pixel — it measures positions.)
         a = frame_bgr.copy()
-        rx, ry, rw, rh = GRIPPER_ROI
-        cv2.rectangle(a, (rx, ry), (rx + rw, ry + rh), (255, 255, 0), 2)
-        cv2.drawMarker(a, (rx + rw // 2, ry + rh // 2), (255, 255, 0),
-                       cv2.MARKER_CROSS, 24, 2)
-        blob = find_object_blob(frame_rgb, self._color_name, depth_mm=depth_mm)
-        if blob is not None:
-            cx, cy, (bx, by, bw, bh), angle = blob
+        blobs = find_all_blobs(frame_rgb, self._color_name, depth_mm=depth_mm)
+        for blob in blobs:
+            bx, by, bw, bh = blob.bbox
             cv2.rectangle(a, (bx, by), (bx + bw, by + bh), (0, 255, 0), 2)
-            cv2.drawMarker(a, (cx, cy), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 20, 2)
-            cv2.putText(a, f"{angle:+.1f} deg", (bx, max(0, by - 8)),
+            cv2.drawMarker(a, (blob.cx, blob.cy), (0, 0, 255),
+                           cv2.MARKER_TILTED_CROSS, 20, 2)
+            cv2.putText(a, f"{blob.area:.0f}px {blob.angle:+.0f}deg",
+                        (bx, max(0, by - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        a = _label(_fit(a), "color + target center")
+        a = _label(_fit(a), f"color + {len(blobs)} detection(s)")
 
         # [B] Depth colormap
         if depth_mm is not None:

@@ -1,73 +1,82 @@
 """
-Fine visual servoing (IBVS P-controller) with lost-target recovery.
+PBVS grasp alignment (Position-Based Visual Servoing / industrial
+look-then-move for a calibrated eye-in-hand RGB-D wrist camera).
 
-Drive:  nudge the arm in XY so the blob CENTROID moves toward the center of
-        GRIPPER_ROI. The pixel error is mapped to a robot-frame delta via the
-        HOMOGRAPHY: Δ = SERVO_GAIN · (H(p_obj) − H(p_aim)). H's absolute
-        mapping is only valid at TOP_VIEW_POSE, but the camera orientation is
-        identical at the hover pose (rigid mount, same roll/pitch/yaw), so H's
-        DIRECTION is always right — only its scale is off, which the gain +
-        step clamp absorb. No hand-tuned axis signs.
+How it works — no pixel chasing:
+  Measure: each fresh frame measures the target cube's position IN THE ROBOT
+        BASE FRAME (per-blob depth → deproject → extrinsics). The mapping
+        p_cube = p_tcp(live) + R·p_cam + t is TCP-relative, so it is valid
+        from ANY arm position; every measurement is automatically anchored to
+        wherever the arm currently is. All measurements happen at the
+        calibration orientation (roll/pitch/yaw = −180/0/0, yaw rotates only
+        after lock) because R assumes it.
+  Move:  command the TCP directly at the grasp point (the cube's measured
+        position + TOOL_OFFSET), damped by PBVS_DAMPING and clamped to
+        PBVS_MAX_STEP_MM. The target is the cube's own in-envelope position,
+        so the servo can never walk out of the workspace the way the old
+        offset-aim pixel loop could. The camera↔gripper offset lives in the
+        extrinsics t — no explicit −70 mm constant, and the cube may sit
+        anywhere in the frame.
+  Refine: once aligned at hover height, descend to PBVS_REFINE_Z_MM and
+        re-verify from the shorter lever arm (sharper px/mm, smaller
+        calibration-tilt error), then lock.
+  Fresh: every measurement waits for a frame CAPTURED AFTER the previous move
+        finished (camera timestamps) — stale mid-move frames were the source
+        of the old over-stepping.
 
-Accept: blob centroid within CENTER_LOCK_TOL_PX of the aim for
-        SERVO_CONFIRM_FRAMES consecutive frames while the arm stands still
-        (rotation-invariant; bbox containment was unsatisfiable for rotated
-        cubes). With a depth camera, the centroid is the TOP-FACE centroid, so
-        an angled view can't drag the aim toward a corner.
-
-Lost target: (1) return to the position where the blob was last seen, halving
-        the step gain each loss episode; (2) only if still invisible there,
-        expanding square spiral; exhaustion aborts early for an FSM re-scan.
+Select: multi-object aware via WORLD-FRAME TARGET IDENTITY — candidates are
+        measured in the base frame and matched to the target's known position
+        within TARGET_MATCH_TOL_MM; blobs near already-delivered cubes
+        (avoid_xy) are never selected. Depth dropout falls back to matching
+        against the target's PROJECTED pixel. A frame matching neither tier =
+        target lost; sustained loss aborts for an FSM re-scan (no blind
+        spiral — the world already knows where cubes are).
 """
 
 import time
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 
 import numpy as np
 
 from utils.constants import (
-    SERVO_GAIN,
-    SERVO_GAIN_3D,
-    MAX_SERVO_STEP_MM,
-    SERVO_DEADBAND_PX,
-    GRIPPER_ROI,
-    CENTER_LOCK_TOL_PX,
-    SERVO_CONFIRM_FRAMES,
-    SERVO_SETTLE_S,
-    SEARCH_START_DELAY_S,
-    SEARCH_STEP_MM,
-    SEARCH_MAX_STEPS,
+    GRASP_Z,
     FINE_ADJUST_SPEED,
+    PBVS_TOL_MM,
+    PBVS_CONFIRM_FRAMES,
+    PBVS_DAMPING,
+    PBVS_MAX_STEP_MM,
+    PBVS_MAX_ITERS,
+    PBVS_REFINE_Z_MM,
+    FRAME_FRESH_TIMEOUT_S,
+    LOST_TARGET_GRACE_S,
+    TOOL_OFFSET_X,
+    TOOL_OFFSET_Y,
+    TARGET_MATCH_TOL_MM,
+    TARGET_AVOID_RADIUS_MM,
+    TARGET_EMA_ALPHA,
+    DEPTH_TRUST_MIN_TCP_Z_MM,
+    DEPTH_MIN_PLAUSIBLE_MM,
+    TRACK_MAX_JUMP_PX,
+    SERVO_MAX_BLOB_AREA_PX,
 )
 from utils.vision.helpers import clamp
-from utils.vision.camera import read_fresh
-from utils.vision.detection import find_object_blob
-from utils.vision.homography import pixel_to_robot
-from utils.vision.localize3d import deproject
-from utils.vision.safety import SafetyMonitor
-
-
-def _spiral_offsets(step_mm: float):
-    """
-    Infinite generator of cumulative (dx, dy) offsets tracing an expanding
-    square spiral: legs of 1,1,2,2,3,3,... steps in directions +X, +Y, -X, -Y.
-    Used to sweep the camera around the approach point when the target is lost.
-    """
-    x = y = 0.0
-    dirs = [(1, 0), (0, 1), (-1, 0), (0, -1)]
-    d = 0
-    run = 1
-    while True:
-        for _ in range(2):
-            ddx, ddy = dirs[d]
-            for _ in range(run):
-                x += ddx * step_mm
-                y += ddy * step_mm
-                yield x, y
-            d = (d + 1) % 4
-        run += 1
+from utils.vision.camera import read_fresh_after
+from utils.vision.detection import (
+    find_all_blobs,
+    refine_blob,
+    select_blob_near,
+    color_mask_of,
+    height_gate_mask,
+)
+from utils.vision.localize3d import (
+    deproject,
+    project,
+    camera_to_base,
+    base_to_camera,
+    robust_depth_at,
+)
 
 
 def _read_depth_if_available(cap):
@@ -78,258 +87,322 @@ def _read_depth_if_available(cap):
     return None
 
 
-def _robust_depth_at(depth_mm, u: int, v: int, half: int = 4):
-    """Median valid depth in a small patch around (u, v); None if unusable."""
-    if depth_mm is None:
-        return None
-    h, w = depth_mm.shape[:2]
-    y0, y1 = max(0, v - half), min(h, v + half + 1)
-    x0, x1 = max(0, u - half), min(w, u + half + 1)
-    patch = depth_mm[y0:y1, x0:x1]
-    valid = patch[np.isfinite(patch) & (patch > 0)]
-    if valid.size < 5:
-        return None
-    return float(np.median(valid))
+class _TargetTracker:
+    """
+    World-frame identity of the cube being grasped. The estimate starts at the
+    SCANNING localization and is refined by an EMA over gated metric
+    measurements (the 45 mm match gate rejects outliers; the EMA averages down
+    depth noise) — it lives in the BASE frame, so it survives every arm move.
+    """
+
+    def __init__(self, target_base=None, avoid_xy=None):
+        if target_base is not None:
+            self.est_xy = (float(target_base[0]), float(target_base[1]))
+            z = target_base[2] if len(target_base) > 2 else None
+            self.est_z = float(z) if z is not None else None
+        else:
+            self.est_xy = None
+            self.est_z = None
+        self.initial_est = self.est_xy    # for the calibration-health residual
+        self.avoid_xy = [(float(x), float(y)) for x, y in (avoid_xy or [])]
+        self.last_match = ""              # "12mm(3D)" / "34px(proj)" — for logs
+        self._warned_oversize = False
+        self._last_reject_log = 0.0
+
+    def update(self, p_base):
+        """EMA the estimate toward a gated measurement (static target)."""
+        a = TARGET_EMA_ALPHA
+        self.est_xy = ((1 - a) * self.est_xy[0] + a * float(p_base[0]),
+                       (1 - a) * self.est_xy[1] + a * float(p_base[1]))
+        if self.est_z is None:
+            self.est_z = float(p_base[2])
+        else:
+            self.est_z = (1 - a) * self.est_z + a * float(p_base[2])
+
+    def residual_mm(self) -> Optional[float]:
+        """|current estimate − SCANNING's estimate| — calibration health."""
+        if self.initial_est is None or self.est_xy is None:
+            return None
+        return ((self.est_xy[0] - self.initial_est[0]) ** 2
+                + (self.est_xy[1] - self.initial_est[1]) ** 2) ** 0.5
+
+    def _log_reject(self, msg):
+        """Rate-limited (1/s) — gate rejections repeat every frame while lost."""
+        now = time.time()
+        if now - self._last_reject_log >= 1.0:
+            self._last_reject_log = now
+            print(msg)
 
 
-def _metric_step(obj_px, aim_px, depth_mm, intrinsics, extrinsics):
+def _match_target(candidates, tracker, depth_mm, tcp, intrinsics, extrinsics):
     """
-    Exact base-frame XY step from pixel error using depth + calibration:
-        Δ_base = R @ (deproject(obj) − deproject(aim))     [same depth plane]
-    Direction AND scale are calibration-true, so no homography scale guess.
-    Returns (dx, dy) in mm or None when depth at the object is unusable.
+    Select OUR cube among the candidate blobs, by robustness tier:
+      1. Metric (Orbbec): measure each candidate's base-frame position from its
+         own depth; nearest to the target estimate within TARGET_MATCH_TOL_MM
+         wins; candidates near delivered cubes (avoid_xy) are discarded. When
+         at least one candidate had usable depth, this tier's verdict is FINAL
+         (a gated-out frame means the target is genuinely not visible — a
+         neighbor cube must not be accepted by a looser tier).
+         Trusted only at TCP z >= DEPTH_TRUST_MIN_TCP_Z_MM (wrist Orbbec is
+         inside its min range near the table).
+      2. Expected pixel: project the target's known 3D position into the image
+         (needs no live depth); nearest candidate within TRACK_MAX_JUMP_PX.
+    Returns the matched BlobCandidate or None (target lost this frame — never
+    a silent adoption of a different cube). On a tier-1 match, EMA-updates the
+    estimate.
     """
-    d = _robust_depth_at(depth_mm, obj_px[0], obj_px[1])
-    if d is None:
+    if not candidates:
         return None
-    p_obj = deproject(obj_px[0], obj_px[1], d, intrinsics)
-    p_aim = deproject(aim_px[0], aim_px[1], d, intrinsics)
-    R, _t = extrinsics
-    delta = R @ (p_obj - p_aim)
-    return float(delta[0]), float(delta[1])
+
+    if (tracker.est_xy is None or intrinsics is None or extrinsics is None
+            or tcp is None):
+        tracker._log_reject("[Vision] Target matching needs a target identity + "
+                            "intrinsics + extrinsics — none matched this frame.")
+        return None
+
+    R, t = extrinsics
+    tcp_xyz = tcp[:3]
+
+    # --- Tier 1: per-candidate metric measurement ---
+    if depth_mm is not None and tcp[2] >= DEPTH_TRUST_MIN_TCP_Z_MM:
+        best, best_dist, best_p, measured = None, None, None, 0
+        for c in candidates:
+            d = robust_depth_at(depth_mm, c.cx, c.cy)
+            if d is None or d < DEPTH_MIN_PLAUSIBLE_MM:
+                continue
+            measured += 1
+            p = camera_to_base(deproject(c.cx, c.cy, d, intrinsics), tcp_xyz, R, t)
+            if any((p[0] - ax) ** 2 + (p[1] - ay) ** 2 < TARGET_AVOID_RADIUS_MM ** 2
+                   for ax, ay in tracker.avoid_xy):
+                continue   # a cube we already delivered — never our target
+            dist = ((p[0] - tracker.est_xy[0]) ** 2
+                    + (p[1] - tracker.est_xy[1]) ** 2) ** 0.5
+            if best_dist is None or dist < best_dist:
+                best, best_dist, best_p = c, dist, p
+        if measured:
+            if best is not None and best_dist <= TARGET_MATCH_TOL_MM:
+                tracker.update(best_p)
+                tracker.last_match = f"{best_dist:.0f}mm(3D)"
+                return best
+            tracker._log_reject(
+                f"[Vision] {len(candidates)} blob(s) visible but none within "
+                f"{TARGET_MATCH_TOL_MM:.0f}mm of the target at "
+                f"({tracker.est_xy[0]:.0f}, {tracker.est_xy[1]:.0f}) "
+                f"(nearest {best_dist:.0f}mm)" if best is not None else
+                f"[Vision] {len(candidates)} blob(s) visible but all are "
+                f"delivered cubes / gated out — target not in view.")
+            return None
+
+    # --- Tier 2: expected-pixel projection (no live depth needed) ---
+    if tracker.est_z is not None:
+        p_base = np.array([tracker.est_xy[0], tracker.est_xy[1], tracker.est_z])
+        exp = project(base_to_camera(p_base, tcp_xyz, R, t), intrinsics)
+        if exp is not None:
+            sel = select_blob_near(candidates, (int(exp[0]), int(exp[1])),
+                                   max_dist_px=TRACK_MAX_JUMP_PX)
+            if sel is not None:
+                dist_px = ((sel.cx - exp[0]) ** 2 + (sel.cy - exp[1]) ** 2) ** 0.5
+                tracker.last_match = f"{dist_px:.0f}px(proj)"
+                return sel
+            tracker._log_reject(
+                f"[Vision] No blob within {TRACK_MAX_JUMP_PX}px of the target's "
+                f"projected pixel ({exp[0]:.0f}, {exp[1]:.0f}).")
+            return None
+
+    tracker._log_reject("[Vision] No usable depth and no target height estimate — "
+                        "cannot match this frame.")
+    return None
+
+
+def _detect_target(frame_rgb, color_name, depth_mm, tracker, tcp,
+                   intrinsics, extrinsics):
+    """
+    One full perception pass: mask → all candidates → world-frame match →
+    blob-scoped top-face refinement of the selection.
+    Returns (cx, cy, bbox, angle) or None.
+    """
+    mask = color_mask_of(frame_rgb, color_name)
+    if depth_mm is not None:
+        mask = height_gate_mask(mask, depth_mm)
+    candidates = find_all_blobs(frame_rgb, color_name, mask=mask)
+
+    sel = _match_target(candidates, tracker, depth_mm, tcp, intrinsics, extrinsics)
+    if sel is None:
+        return None
+
+    if (SERVO_MAX_BLOB_AREA_PX is not None and sel.area > SERVO_MAX_BLOB_AREA_PX
+            and not tracker._warned_oversize):
+        tracker._warned_oversize = True
+        print(f"[Vision] WARNING: matched blob area {sel.area:.0f}px exceeds "
+              f"{SERVO_MAX_BLOB_AREA_PX:.0f}px — possibly two touching cubes.")
+
+    return refine_blob(mask, sel.contour, depth_mm)
 
 
 def visual_servo_to_grasp(
     cap,
     robot,
     target_object: str,
-    H,
     timeout: float = 15.0,
-    safety_monitor: Optional[SafetyMonitor] = None,
     should_stop_cb=None,
     intrinsics=None,
     extrinsics=None,
-) -> Tuple[bool, Optional[float]]:
+    target_base=None,
+    avoid_xy=None,
+) -> Tuple[bool, Optional[float], Optional[Tuple[float, float]]]:
     """
-    Returns (locked, angle_deg):
-      - locked: True once the centroid lock criterion holds.
-      - angle_deg: the object's in-image rotation ([-45, 45), from the LAST
-        confirmation frame) so the caller can yaw-align the gripper without
-        another camera read. None when not locked.
+    PBVS alignment over the target cube. Returns (locked, angle_deg, grasp_xy):
+      - locked:   True once the TCP sits over the grasp point within
+                  PBVS_TOL_MM for PBVS_CONFIRM_FRAMES fresh frames, verified
+                  from the PBVS_REFINE_Z_MM stage.
+      - angle_deg: the cube's in-image rotation from the last matched frame
+                  (for the caller's yaw-align), None when not locked.
+      - grasp_xy: the base-frame (x, y) the descend should target — the
+                  final measured cube position + TOOL_OFFSET. None when not
+                  locked.
 
-    Step mapping: with intrinsics + extrinsics + depth (Orbbec runs), pixel
-    error converts to an EXACT base-frame delta (SERVO_GAIN_3D). Without them
-    (stream runs), the homography-direction step (SERVO_GAIN) is used.
+    target_base: (x, y, z|None) base-frame mm of the SCANNING-chosen cube.
+    avoid_xy: [(x, y), ...] of cubes already sitting in the task's target zone.
+    Requires intrinsics + extrinsics + target_base (calibrated Orbbec only).
     """
-    use_3d = intrinsics is not None and extrinsics is not None
-    if H is None and not use_3d:
-        print("[Vision] No homography and no 3D calibration — cannot map pixel error.")
-        return False, None
+    if intrinsics is None or extrinsics is None:
+        print("[Vision] Grasping requires the local Orbbec (intrinsics) + "
+              "calibrated extrinsics (script/lite6_extrinsics.py) — aborting.")
+        return False, None, None
+    if target_base is None:
+        print("[Vision] No target identity from SCANNING — aborting.")
+        return False, None, None
 
     color_name = target_object.split()[0].lower()
-    rx, ry, rw, rh = GRIPPER_ROI
-    aim_x = rx + rw // 2
-    aim_y = ry + rh // 2
-    aim_robot = pixel_to_robot(aim_x, aim_y, H) if H is not None else None
+    tracker = _TargetTracker(target_base, avoid_xy)
+
+    def grasp_target():
+        return (tracker.est_xy[0] + TOOL_OFFSET_X,
+                tracker.est_xy[1] + TOOL_OFFSET_Y)
+
+    print(f"[Vision] PBVS target: base ({tracker.est_xy[0]:.1f}, "
+          f"{tracker.est_xy[1]:.1f}"
+          + (f", z {tracker.est_z:.1f}" if tracker.est_z is not None else "")
+          + f") mm, avoiding {len(tracker.avoid_xy)} delivered cube(s).")
+
+    # Reachability precheck: the grasp TCP is the cube's own position, so this
+    # only trips when the cube genuinely can't be picked — fail fast instead of
+    # walking toward an impossible point.
+    pos = robot.get_current_position()
+    if pos is None:
+        return False, None, None
+    gx, gy = grasp_target()
+    if not (robot.in_workspace(gx, gy, pos[2]) and robot.in_workspace(gx, gy, GRASP_Z)):
+        print(f"[Vision] Cube unreachable — grasp TCP ({gx:.1f}, {gy:.1f}) is "
+              f"outside the workspace envelope. Aborting.")
+        return False, None, None
+    if not (robot.is_pose_reachable(gx, gy, pos[2])
+            and robot.is_pose_reachable(gx, gy, GRASP_Z)):
+        print(f"[Vision] Cube unreachable — grasp TCP ({gx:.1f}, {gy:.1f}) is "
+              f"outside the kinematic reach sphere. Aborting.")
+        return False, None, None
 
     start_time = time.time()
-    confirm_count = 0
+    confirm = 0
     last_angle = None
-
-    # Lost-target recovery state
+    last_move_end = 0.0      # first frame needs no freshness wait
     last_seen = time.time()
-    last_seen_pos = None       # arm position at the most recent detection
-    returned_to_seen = False   # tried the return-to-last-seen undo this episode?
-    loss_backoff = 1.0         # step-size annealing: halved after each loss
-                               # episode so a step can't repeatedly overshoot
-                               # into a detection dead-zone
-    search_center = None
-    spiral_iter = None
-    search_steps = 0
-
-    print(f"[Vision] Visual servoing '{target_object}' into gripper ROI {GRIPPER_ROI}...")
+    at_refine_stage = False
+    iters = 0
 
     while True:
         if should_stop_cb and should_stop_cb():
-            print("[Vision] Stop requested during visual servoing.")
-            return False, None
-
+            print("[Vision] Stop requested during PBVS alignment.")
+            return False, None, None
         if time.time() - start_time > timeout:
-            print("[Vision] Visual servoing TIMEOUT.")
-            return False, None
-
+            print("[Vision] PBVS alignment TIMEOUT.")
+            return False, None, None
         if robot.has_error():
-            print("[Vision] Arm in error state during servoing — aborting.")
-            return False, None
+            print("[Vision] Arm in error state during PBVS alignment — aborting.")
+            return False, None, None
 
-        ret, frame_bgr = read_fresh(cap)
+        # Measure only on frames captured AFTER the last move finished.
+        ret, frame_bgr = read_fresh_after(cap, last_move_end, FRAME_FRESH_TIMEOUT_S)
         if not ret:
-            time.sleep(0.033)
+            time.sleep(0.05)
             continue
-
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-
-        # --- Hand safety: pause the arm, hold until clear, then resume ---
-        if safety_monitor:
-            safety_monitor.update_frame(frame_rgb)
-            if safety_monitor.is_hand_present():
-                print("[SAFETY] Hand detected during servoing — pausing arm...")
-                robot.pause()
-                while safety_monitor.is_hand_present():
-                    time.sleep(0.05)
-                    r2, f2 = read_fresh(cap)
-                    if r2:
-                        safety_monitor.update_frame(cv2.cvtColor(f2, cv2.COLOR_BGR2RGB))
-                robot.resume()
-                print("[SAFETY] Hand removed — resuming servoing.")
-                start_time = time.time()   # don't penalise the pause against the timeout
-                confirm_count = 0
-                continue
-
         depth_mm = _read_depth_if_available(cap)
-        blob = find_object_blob(frame_rgb, color_name, depth_mm=depth_mm)
-        if blob is None:
-            confirm_count = 0
-
-            # Brief grace window: don't launch a search over one flickered frame.
-            if time.time() - last_seen < SEARCH_START_DELAY_S:
-                time.sleep(0.033)
-                continue
-
-            # --- First recovery: undo the last approach. Losses cluster at the
-            # final-approach frontier (frame-edge clipping / gripper shadow);
-            # returning to the exact spot where the blob was last visible
-            # breaks the servo↔search limit cycle. ---
-            if last_seen_pos is not None and not returned_to_seen:
-                returned_to_seen = True
-                loss_backoff = max(0.125, loss_backoff * 0.5)
-                print(f"[Vision] Target lost — returning to last-seen position "
-                      f"({last_seen_pos[0]:.1f}, {last_seen_pos[1]:.1f}) "
-                      f"[step backoff → {loss_backoff:.3f}]...")
-                if not robot.move_to(last_seen_pos[0], last_seen_pos[1], last_seen_pos[2],
-                                     speed=FINE_ADJUST_SPEED, wait=True):
-                    print("[Vision] Return move failed (rejected/faulted) — aborting.")
-                    return False, None
-                time.sleep(SERVO_SETTLE_S)
-                continue   # re-read; blob should be visible here again
-
-            # --- Second recovery: spiral search sweeping the camera around the
-            # last position until the blob re-enters the frame. ---
-            if search_center is None:
-                pos0 = robot.get_current_position()
-                if pos0 is None:
-                    time.sleep(0.033)
-                    continue
-                search_center = (pos0[0], pos0[1], pos0[2])
-                spiral_iter = _spiral_offsets(SEARCH_STEP_MM)
-                search_steps = 0
-                print(f"[Vision] Target lost — spiral search around "
-                      f"({search_center[0]:.1f}, {search_center[1]:.1f})...")
-
-            moved = False
-            while search_steps < SEARCH_MAX_STEPS:
-                search_steps += 1
-                off_x, off_y = next(spiral_iter)
-                tx = search_center[0] + off_x
-                ty = search_center[1] + off_y
-                tz = search_center[2]
-                if not robot.in_workspace(tx, ty, tz):
-                    continue   # unreachable spiral point; budget still consumed
-                print(f"[Vision] Spiral search step {search_steps}/{SEARCH_MAX_STEPS} "
-                      f"→ ({tx:.1f}, {ty:.1f})")
-                if not robot.move_to(tx, ty, tz, speed=FINE_ADJUST_SPEED, wait=True):
-                    print("[Vision] Search nudge failed (rejected/faulted) — aborting.")
-                    return False, None
-                moved = True
-                time.sleep(SERVO_SETTLE_S)   # post-move frame, not a stale one
-                # Search has its own budget; don't let it eat the servo timeout.
-                start_time = time.time()
-                break
-
-            if not moved:
-                print("[Vision] Target lost — spiral search exhausted. Aborting for re-scan.")
-                return False, None
-            continue   # loop re-reads the camera and re-detects after the nudge
-
-        obj_cx, obj_cy, bbox, angle = blob
-        last_seen = time.time()
-        last_seen_pos = robot.get_current_position() or last_seen_pos
-        if search_center is not None or returned_to_seen:
-            print("[Vision] Target reacquired — resuming servoing.")
-        returned_to_seen = False
-        search_center = None
-        spiral_iter = None
-        search_steps = 0
-
-        err_x = obj_cx - aim_x
-        err_y = obj_cy - aim_y
-
-        # --- Acceptance: centroid within tolerance of the aim point, held for
-        # N consecutive frames while the arm stands still. ---
-        if abs(err_x) <= CENTER_LOCK_TOL_PX and abs(err_y) <= CENTER_LOCK_TOL_PX:
-            confirm_count += 1
-            last_angle = angle
-            if confirm_count >= SERVO_CONFIRM_FRAMES:
-                print(f"[Vision] Centroid ({err_x:+d},{err_y:+d}) px from aim for "
-                      f"{confirm_count} frames. Locked (angle={last_angle:.1f}°).")
-                return True, last_angle
-            time.sleep(SERVO_SETTLE_S)   # hold still; re-read to confirm stability
-            continue
-        confirm_count = 0
-
-        # --- Drive: centroid error toward the ROI center ---
-        cmd_x = aim_x if abs(err_x) < SERVO_DEADBAND_PX else obj_cx
-        cmd_y = aim_y if abs(err_y) < SERVO_DEADBAND_PX else obj_cy
 
         pos = robot.get_current_position()
         if pos is None:
-            time.sleep(0.033)
-            continue
-
-        # Step mapping, best available first:
-        #   3D metric (depth + intrinsics + extrinsics): exact base-frame delta.
-        #   Homography direction (stream mode): direction exact, scale damped.
-        # Both annealed by the loss backoff and bounded by the step clamp.
-        step = None
-        if use_3d and depth_mm is not None:
-            step = _metric_step((cmd_x, cmd_y), (aim_x, aim_y), depth_mm, intrinsics, extrinsics)
-            if step is not None:
-                gain = SERVO_GAIN_3D * loss_backoff
-                dx = clamp(gain * step[0], MAX_SERVO_STEP_MM)
-                dy = clamp(gain * step[1], MAX_SERVO_STEP_MM)
-        if step is None:
-            if aim_robot is None:
-                time.sleep(0.033)   # 3D-only run with momentary bad depth: retry
-                continue
-            obj_robot = pixel_to_robot(cmd_x, cmd_y, H)
-            gain = SERVO_GAIN * loss_backoff
-            dx = clamp(gain * (obj_robot[0] - aim_robot[0]), MAX_SERVO_STEP_MM)
-            dy = clamp(gain * (obj_robot[1] - aim_robot[1]), MAX_SERVO_STEP_MM)
-
-        # Nothing meaningful to command (dead-banded to ~zero): don't spam the
-        # controller with no-op moves; just re-read.
-        if abs(dx) < 0.05 and abs(dy) < 0.05:
             time.sleep(0.05)
             continue
 
-        print(f"[Vision] err=({err_x:+d},{err_y:+d}) px → step=({dx:+.1f},{dy:+.1f}) mm")
-        if not robot.move_to(pos[0] + dx, pos[1] + dy, pos[2],
-                             speed=FINE_ADJUST_SPEED, wait=True):
-            print("[Vision] Servo nudge failed (rejected/faulted) — aborting.")
-            return False, None
+        blob = _detect_target(frame_rgb, color_name, depth_mm, tracker,
+                              pos, intrinsics, extrinsics)
+        if blob is None:
+            confirm = 0
+            if time.time() - last_seen > LOST_TARGET_GRACE_S:
+                print("[Vision] Target lost — aborting for an FSM re-scan "
+                      "(the world matcher will not adopt a different cube).")
+                return False, None, None
+            time.sleep(0.05)
+            continue
 
-        # Let the stream catch up so the next step is computed from a
-        # genuinely post-move frame (MJPEG has encode/transmit latency).
-        time.sleep(SERVO_SETTLE_S)
+        _cx, _cy, _bbox, angle = blob
+        last_seen = time.time()
+        last_angle = angle
 
-    return False, None
+        gx, gy = grasp_target()
+        err_x = gx - pos[0]
+        err_y = gy - pos[1]
+        err = (err_x ** 2 + err_y ** 2) ** 0.5
+
+        if err <= PBVS_TOL_MM:
+            confirm += 1
+            if confirm < PBVS_CONFIRM_FRAMES:
+                continue
+            if not at_refine_stage:
+                # Stage 2: verify from the shorter lever arm before locking —
+                # sharper px/mm and less calibration-tilt sensitivity.
+                at_refine_stage = True
+                confirm = 0
+                if pos[2] > PBVS_REFINE_Z_MM + 5.0:
+                    print(f"[Vision] Aligned at hover — descending to refine "
+                          f"height Z={PBVS_REFINE_Z_MM:.0f} for verification...")
+                    if not robot.move_to(gx, gy, PBVS_REFINE_Z_MM,
+                                         speed=FINE_ADJUST_SPEED, wait=True):
+                        print("[Vision] Refine descend failed — aborting.")
+                        return False, None, None
+                    last_move_end = time.time()
+                continue
+            residual = tracker.residual_mm()
+            print(f"[Vision] PBVS LOCKED at ({gx:.1f}, {gy:.1f}) "
+                  f"[match {tracker.last_match}, angle {last_angle:.1f}°]. "
+                  f"Calibration health: scan→final residual "
+                  f"{residual:.1f} mm." if residual is not None else
+                  f"[Vision] PBVS LOCKED at ({gx:.1f}, {gy:.1f}).")
+            return True, last_angle, (gx, gy)
+        confirm = 0
+
+        iters += 1
+        if iters > PBVS_MAX_ITERS:
+            print(f"[Vision] PBVS move budget ({PBVS_MAX_ITERS}) exhausted at "
+                  f"err {err:.1f} mm — aborting for a re-scan.")
+            return False, None, None
+
+        step_x = clamp(PBVS_DAMPING * err_x, PBVS_MAX_STEP_MM)
+        step_y = clamp(PBVS_DAMPING * err_y, PBVS_MAX_STEP_MM)
+        tx, ty = pos[0] + step_x, pos[1] + step_y
+        if not robot.in_workspace(tx, ty, pos[2]):
+            # The step is toward the cube's own (pre-validated) position, so
+            # this only fires if the estimate escaped the envelope mid-run.
+            print(f"[Vision] PBVS step target ({tx:.1f}, {ty:.1f}) left the "
+                  f"envelope — aborting.")
+            return False, None, None
+
+        print(f"[Vision] PBVS iter {iters}: cube at ({tracker.est_xy[0]:.1f}, "
+              f"{tracker.est_xy[1]:.1f}) [match {tracker.last_match}] — "
+              f"err {err:.1f} mm → move ({step_x:+.1f}, {step_y:+.1f}).")
+        if not robot.move_to(tx, ty, pos[2], speed=FINE_ADJUST_SPEED, wait=True):
+            print("[Vision] PBVS correction move failed (rejected/faulted) — aborting.")
+            return False, None, None
+        last_move_end = time.time()
+
+    return False, None, None

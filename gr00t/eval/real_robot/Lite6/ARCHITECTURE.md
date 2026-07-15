@@ -114,16 +114,6 @@ To maintain absolute behavioral consistency with the original SO ARM codebase, t
 
 The following critical system-level features must be implemented precisely as they were in the SO ARM setup:
 
-### 7.1. Hand Detection & Safety Motion Freeze
-*   **The Problem:** Humans reaching into the workspace during automatic operation is a high-risk safety concern. 
-*   **The Baseline Logic:** We utilize a multiprocessing `SafetyMonitor` running Google MediaPipe Hands in a separate Python process to bypass the GIL (Global Interpreter Lock). 
-*   **The Mechanism:**
-    *   The main control loop passes downscaled frames $(256 \times 256)$ lazily to a shared-memory queue `frame_queue` (with a max capacity of 1 to prevent queue latency buildup).
-    *   A shared boolean flag `hand_detected` is updated in $O(1)$ real-time.
-    *   **Important Lite6 difference vs SO100:** SO100 streamed 30 fps joint actions, so a freeze halted within ~33 ms between actions. The Lite6 is commanded with *Cartesian trajectory* moves. A blocking `set_position(wait=True)` cannot be interrupted, so naively polling the flag only reacts *between* moves. To genuinely halt mid-trajectory, moves are issued **non-blocking** (`wait=False`) and `_safe_move` (in `fsm.py`) / the visual-servo loop poll `is_hand_present()` continuously while the arm is in motion.
-    *   When a hand appears, the controller calls `robot.pause()` → `arm.set_state(4)`, which **halts the in-flight trajectory immediately**. It holds until the hand leaves, then `robot.resume()` → `arm.set_state(0)` continues the queued motion from where it paused.
-    *   The servo timeout clock is reset across a pause so a long human interruption doesn't count as a servoing failure.
-
 ### 7.2. Graceful Shutdown & Signal Handling
 *   **The Mechanism:** Standard Ctrl+C (SIGINT) or SIGTERM must not result in the Lite 6 dropping payloads or locking up in an awkward position.
 *   **The Logic:**

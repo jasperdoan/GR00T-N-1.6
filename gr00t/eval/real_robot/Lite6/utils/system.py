@@ -39,6 +39,19 @@ def clear_stop_flag():
             pass
 
 
+def set_stop_flag():
+    """
+    Create the stop flag file. Used by auto.py's empty-workspace give-up so the
+    24/7 supervisor (auto_supervised.sh checks this file before relaunching)
+    stops instead of restarting an idle loop.
+    """
+    try:
+        with open(STOP_FLAG_PATH, "w"):
+            pass
+    except Exception as e:
+        print(f"[System] Failed to set stop flag: {e}")
+
+
 def set_in_use():
     try:
         with open(INUSE_FLAG_PATH, "w") as f:

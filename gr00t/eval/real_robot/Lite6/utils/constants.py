@@ -2,9 +2,11 @@ import os
 
 # --- NETWORK & SYSTEM ---
 DEFAULT_IP = "192.168.1.189"
-# Camera source: int → local /dev/video device index; str → network stream URL.
-# The wrist camera is hosted on a separate machine serving MJPEG over HTTP.
-CAMERA_SOURCE = "http://172.21.2.83:9988/stream.mjpg"
+# Camera source: int → local Orbbec device index; str → network MJPEG URL.
+# Default is the local Orbbec: grasping REQUIRES depth + intrinsics +
+# calibrated extrinsics (the homography was removed) — the color-only stream
+# remains usable only for viewing/recording tools.
+CAMERA_SOURCE = 0
 
 INUSE_FLAG_PATH = "/tmp/lite6_inuse.flag"
 STOP_FLAG_PATH  = "/tmp/stop_lite6.flag"
@@ -12,64 +14,93 @@ STOP_FLAG_PATH  = "/tmp/stop_lite6.flag"
 
 # --- FILE PATHS ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MATRIX_PATH = os.path.join(BASE_DIR, "data", "homography_matrix.npy")
-# Camera→robot rigid transform (R, t) solved by script/lite6_extrinsics.py.
-# When present AND the camera provides depth, SCANNING localizes the object in
-# full 3D (deprojected point cloud → base frame) instead of via the homography.
+# Camera→robot rigid transform (R, t) solved by script/lite6_extrinsics.py —
+# THE single calibration of the pipeline. All pixel→robot geometry (scanning,
+# occupancy, drop rects, servo steps) runs through it + the color intrinsics.
 EXTRINSICS_PATH = os.path.join(BASE_DIR, "data", "extrinsics.npz")
 # Separate output dirs so eval's before/after snapshots don't land in the auto dir.
-OUTPUT_DIR_EVAL = "gr00t/eval/real_robot/Lite6/data/outputs/GR00T-N-1.6/lite6_eval"
-OUTPUT_DIR_AUTO = "gr00t/eval/real_robot/Lite6/data/outputs/GR00T-N-1.6/lite6_auto"
+OUTPUT_DIR_EVAL = "/workspaces/data/outputs/GR00T-N-1.6/lite6_eval"
+OUTPUT_DIR_AUTO = "/workspaces/data/outputs/GR00T-N-1.6/lite6_auto"
 
 # --- ROBOT MOTION SETTINGS ---
 DEFAULT_SPEED = 200        # mm/s
 DEFAULT_ACCEL = 500        # mm/s^2
 FINE_ADJUST_SPEED = 80     # mm/s (for visual servoing)
 
-GRIPPER_OPEN_DWELL_S  = 1.5  # dwell after an OPEN before stopping the motor —
-                             # a short dwell cut the motor mid-travel (half-open)
-GRIPPER_CLOSE_DWELL_S = 3.0  # dwell after a CLOSE so the jaws fully seat on the
-                             # object before lifting (Lite6 gripper is slow to bite)
+# Vacuum head timing (tool GPIO-driven suction cup; see robot.py for the
+# open/close_lite6_gripper → suction ON/OFF wire mapping).
+VACUUM_GRIP_DWELL_S    = 3.0  # dwell after energizing suction so it fully seats
+                              # on the object before lifting
+VACUUM_RELEASE_DWELL_S = 1.5  # dwell after venting so the object drops free
+                              # before de-energizing the valve lines
 
-# Uniform random offset applied to each place/drop position so repeated cycles
-# don't stack objects on the exact same spot (mirrors SO100's place variation).
-PLACE_VARIATION_MM = 10.0
+# --- Whole-zone randomized placement ---
+# Drop points are sampled uniformly across the target zone (its pixel ROI
+# corners ray-cast onto the table plane via intrinsics + extrinsics) instead
+# of jittered around one nominal spot: repeated cycles scatter naturally, and
+# because samples stay PLACE_MARGIN_MM inside the ROI, a placed cube can no
+# longer drift half-out of its zone over hundreds of cycles.
+PLACE_MARGIN_MM        = 20.0  # shrink the zone drop rectangle inward by this much
+PLACE_CLEARANCE_MM     = 45.0  # min drop distance from cubes already in the zone
+PLACE_SAMPLE_ATTEMPTS  = 20    # rejection-sampling budget before falling back
+PLACE_MIN_FALLBACK_CLEARANCE_MM = 25.0  # best-effort sample must at least clear
+                                        # a cube footprint, else use the nominal spot
 
 DEFAULT_TASK  = "check_in"
 SCAN_INTERVAL = 3.0  # seconds between scans when idle
 
+# Consecutive empty scans (target object in NO source zone) before auto.py
+# parks the arm, sets the stop flag and exits 0. The stop flag is what makes
+# auto_supervised.sh stop instead of endlessly restarting an idle demo.
+EMPTY_SCAN_GIVE_UP = 3
+
+# Consecutive failed top-view reads before auto.py EXITS nonzero so a
+# supervisor can restart it with a fresh camera. Without this, a dead MJPEG
+# stream / unplugged Orbbec loops "read failed; retrying" forever — the
+# process never dies, so no watchdog can help.
+CAMERA_FAIL_LIMIT = 10   # ~10 × SCAN_INTERVAL ≈ 30 s of blindness
+
 
 # --- Robot Poses & Heights (Cartesian mm) ---
-# Safe height to travel above all objects
-SAFE_Z = 300.0
+# Height ladder: TOP_VIEW 450 (scan) → APPROACH 250 (PBVS) → CARRY 220
+# (transport) → GRASP 105. The Lite6's ~440mm reach sphere is centered at the
+# shoulder (~z 243): TOOL-DOWN AT 450 IS OUT OF REACH AT THE TABLE CORNERS
+# (measured fault at (-180, -330, 450) ≈ 462mm wrist-center distance), so only
+# the central TOP_VIEW_POSE lives that high.
+APPROACH_Z_MM  = 250.0  # GLOBAL_APPROACH hover = PBVS working height (== the
+                        # PBVS refine height, so the refine descend auto-skips).
+                        # NOT higher — see the reach note above.
+TRANSPORT_Z_MM = 220.0  # post-grasp lift + carry height: reach-safe across the
+                        # whole table (worst corner ≈ 378mm), clears standing
+                        # cubes (~45mm) plus the held payload.
 # Height to execute the actual grasp
-GRASP_Z = 95.5
+GRASP_Z = 105
 # Default Home Position [X, Y, Z, Roll, Pitch, Yaw]
 HOME_POSE = [0.0, -150.0, 200.0, -180.0, 0.0, 0.0]
-TOP_VIEW_POSE = [-50.0, -150.0, 300.0, -180.0, 0.0, 0.0]
+TOP_VIEW_POSE = [0.0, -150.0, 450.0, -180.0, 0.0, 0.0]
 
 # --- Workspace envelope (Cartesian mm) ---
-# Reject any homography/servo target outside this box before commanding a move,
+# Reject any vision/servo target outside this box before commanding a move,
 # so a bad detection can't fault the arm by driving it out of reach.
-WORKSPACE_X_RANGE = (-200.0, 40.0)
-WORKSPACE_Y_RANGE = (-340.0, -110.0)
-WORKSPACE_Z_RANGE = (90.0, 310.0)
+WORKSPACE_X_RANGE = (-220.0, 90.0)
+WORKSPACE_Y_RANGE = (-395.0, -75.0)
+WORKSPACE_Z_RANGE = (100.0, 510.0)
 
 
 # --- Zone Definitions (Robot Cartesian Coordinates in mm) ---
 ZONES = {
-    "check_in":  {"x": -60.0, "y": -300.0},
-    "storage":   {"x": -160.0, "y": -300.0},
-    "check_out": {"x": -160.0, "y": -150.0}
+    "check_in":  {"x": 5.0, "y": -327.5},
+    "storage":   {"x": -155.0, "y": -327.5},
+    "check_out": {"x": -155.0, "y": -145.0}
 }
 
 # Top-down-camera pixel ROIs (x, y, w, h) per zone, keyed by the INTERNAL zone
 # names the FSM/NLP use. These restrict color masking to a specific zone so that
 # PRE_CHECK (source), VERIFY (target), and auto's task selection actually work.
 ZONE_PIXEL_ROI = {
-    "check_in":  (166, 425, 235, 226),
-    "storage":   (158, 171, 255, 231),
-    "check_out": (542, 160, 249, 241),
+    "check_in":  (223, 375, 265, 253),
+    "storage":   (230, 99, 254, 251),
+    "check_out": (538, 94, 258, 251),
 }
 
 # Display-name view of the same ROIs, used only for drawing snapshot overlays.
@@ -94,27 +125,54 @@ COLOR_RANGES = {
     "green":  [((40, 50, 50), (90, 255, 255))],
 }
 
-# --- Visual Servoing (Image-Based Visual Servoing P-controller) ---
-# The pixel error is mapped to a robot-frame delta THROUGH THE HOMOGRAPHY
-# (H(p_obj) - H(p_aim)): the camera's orientation never changes between the
-# calibration pose and the hover pose, so H's direction is always correct and
-# only its scale is off (camera is closer at hover -> H overestimates mm/px by
-# roughly the height ratio). SERVO_GAIN damps that overestimate.
-# Steps are error-proportional (gradient-descent-like): ~MAX_SERVO_STEP_MM when
-# far, ~1 mm near the target.
-# GAIN MEASURED FROM HARDWARE (check_in log 2026-07-01): a (-7.3, -8.0) mm step
-# changed the pixel error by (+29, +42) px → true scale at hover ≈ 0.175 mm/px,
-# while H predicts ≈ 0.39 mm/px — a 2.2x overestimate. Effective per-step
-# fraction = SERVO_GAIN × 2.2, so 0.22 here ≈ 0.5 real (stable, no overshoot).
-SERVO_GAIN = 0.10             # fraction of the homography-mapped error per step
-MAX_SERVO_STEP_MM = 8.0       # clamp per-iteration delta so a big initial error
-                              # can't command an overshoot at FINE_ADJUST_SPEED
-SERVO_DEADBAND_PX = 3         # ignore sub-pixel jitter below this error
+# --- PBVS (Position-Based Visual Servoing / industrial look-then-move) ---
+# The servo does NOT chase pixels: each fresh frame measures the cube's
+# position IN THE ROBOT BASE FRAME (depth deprojection + extrinsics, valid at
+# any pose since R,t are TCP-relative), and the TCP is commanded directly at
+# the grasp point — damped, clamped, and always workspace-validated (the
+# target is the cube's own in-envelope position, so the servo can no longer
+# walk out of the workspace chasing an offset aim pixel).
+PBVS_TOL_MM         = 2.5   # |measured cube − grasp target| to count as aligned
+PBVS_CONFIRM_FRAMES = 2     # consecutive fresh frames within tol to lock
+PBVS_DAMPING        = 0.75  # fraction of the measured error corrected per move
+PBVS_MAX_STEP_MM    = 60.0  # per-move clamp (moves are exact, so steps can be big)
+PBVS_MAX_ITERS      = 12    # correction-move budget before aborting for a re-scan
+PBVS_REFINE_Z_MM    = 250.0 # two-stage: after hover alignment, descend here and
+                            # re-measure (sharper px/mm, shorter calibration lever
+                            # arm) before the final blind descend; must stay >=
+                            # DEPTH_TRUST_MIN_TCP_Z_MM. Equals APPROACH_Z_MM, so
+                            # when GLOBAL_APPROACH already parks at 250 the
+                            # refine descend is skipped automatically.
+FRAME_FRESH_TIMEOUT_S = 1.5 # max wait for a post-move frame before using newest
+LOST_TARGET_GRACE_S   = 1.0 # target unmatched this long → abort for an FSM re-scan
 
-# Settle time after each servo nudge before reading the camera. The MJPEG
-# stream has encode/transmit latency; without this, each step is computed from
-# a slightly PRE-move frame, which systematically overshoots.
-SERVO_SETTLE_S = 0.15
+# --- Tool offset (suction cup vs TCP axis) ---
+# The camera→gripper "watch on the wrist vs finger" geometry lives in the
+# extrinsics t — PBVS needs no explicit camera offset. These are ONLY for
+# residual cup-vs-TCP misalignment measured on hardware (expect ~0; if grasps
+# land consistently offset by a fixed vector, put it here).
+TOOL_OFFSET_X = 0.0
+TOOL_OFFSET_Y = 0.0
+
+# Servo target-continuity gate for the expected-pixel matching tier: a
+# candidate farther than this from the target's projected pixel is a
+# DIFFERENT cube, treated as a lost frame.
+TRACK_MAX_JUMP_PX = 120
+
+# --- World-frame target identity (multi-object servo) ---
+# A cube's identity is its metric position in the ROBOT BASE frame (measured
+# per-blob from Orbbec depth + extrinsics) — static while the arm moves, so
+# the servo can never drift onto a different cube the way pixel-space
+# nearest-to-aim selection could.
+TARGET_MATCH_TOL_MM    = 45.0  # candidate must measure within this of the
+                               # target's known base position to be OUR cube
+TARGET_AVOID_RADIUS_MM = 40.0  # candidates within this of an already-delivered
+                               # cube's position are never selected
+DEPTH_TRUST_MIN_TCP_Z_MM = 250.0  # trust metric depth matching only at/above this
+                                  # TCP height — the wrist Orbbec is inside its
+                                  # minimum range near the table (grainy garbage)
+DEPTH_MIN_PLAUSIBLE_MM   = 120.0  # reject per-candidate depths shorter than this
+                                  # (inside the sensor's min range = invalid)
 
 # --- Move completion (pose convergence) ---
 # _safe_move issues non-blocking moves and detects completion by polling the
@@ -123,39 +181,6 @@ SERVO_SETTLE_S = 0.15
 POSE_TOL_MM    = 2.0    # XYZ distance to target to count as "arrived"
 POSE_TOL_DEG   = 2.0    # yaw distance (covers yaw-only alignment moves)
 MOVE_TIMEOUT_S = 30.0   # give up (and fail the move) after this long
-
-# Gripper ROI: where the object appears in the wrist camera when the gripper is
-# correctly over it (camera is NOT coaxial with the TCP). Measured from 3 samples
-# with the gripper hovering over the object at yaw=0:
-#   (627, 591, 162, 128), (609, 578, 130, 126), (618, 582, 150, 133)
-# ROI = union of the samples (609, 578, 180, 146) + 15 px margin per side.
-# The ROI defines the servo AIM POINT (its center) and the snapshot overlay —
-# it is NOT the lock criterion. Bbox-inside-ROI locking was removed because the
-# axis-aligned bbox is rotation-DEPENDENT: a 45°-rotated cube's bbox inflates
-# by √2 (observed 196×176 vs straight 150×130) and exactly matched the ROI
-# height, making containment unsatisfiable → the servo spun until timeout.
-GRIPPER_ROI = (540, 260, 200, 200)   # (x, y, w, h) in wrist-cam pixels
-
-# LOCK criterion (rotation-invariant): blob CENTROID within this many pixels of
-# the ROI center, per axis. 8 px ≈ 1.4 mm at the measured 0.175 mm/px hover
-# scale. Centroid detection at dead center is reliable since the red V-floor
-# shadow fix (hardware log: err (0,+2) stable for ~60 frames).
-CENTER_LOCK_TOL_PX = 15
-
-# Consecutive frames the centroid must hold within tolerance to lock the servo
-# (HSV mask edges flicker ~1-2 px; a single strict frame would chatter).
-SERVO_CONFIRM_FRAMES = 3
-
-# --- Lost-target spiral search (fine servoing) ---
-# If the blob is not visible in the wrist camera at hover (approach error of a
-# few cm is enough given the offset mount), the servo walks the arm in an
-# expanding square spiral around the approach point until the blob re-enters
-# the frame; normal servoing then resumes. Exhausting the budget aborts early
-# so the FSM's retry path (re-scan from top view) runs instead of idling.
-SEARCH_START_DELAY_S = 1.0   # blob must be unseen this long before searching
-                             # (ignores single-frame detection flicker)
-SEARCH_STEP_MM       = 7.5  # spiral leg increment per nudge
-SEARCH_MAX_STEPS     = 24    # nudge budget before giving up (covers ~±80 mm)
 
 # --- Yaw alignment (grasping rotated objects) ---
 # The object's in-image angle (cv2.minAreaRect at the hover pose) is mapped to a
@@ -166,13 +191,84 @@ CAMERA_YAW_SIGN    = 1.0    # flip to -1.0 if the gripper rotates the wrong way
 CAMERA_YAW_OFFSET  = 0.0    # fixed mount rotation (deg) between image axes and jaws
 
 # --- FSM retry / timeout defaults ---
-VLA_TIMEOUT  = 20.0   # seconds for the visual-servo lock attempt (tight centroid
-                      # lock + per-step settle needs a bit more than the old 15)
+VLA_TIMEOUT  = 20.0   # seconds for the PBVS lock attempt (2-4 exact moves plus
+                      # fresh-frame waits fit comfortably; the budget covers
+                      # lost-target grace periods too)
 MAX_RETRIES  = 2
 
 # --- HSV object detection (top-down) ---
 MIN_BLOB_AREA_PX      = 100
 FRONT_MIN_PRESENCE_PX = 1500
+
+# --- Multi-object counting (top-down zone scans) ---
+# A blob only counts as a cube in a zone when its area is at least this —
+# stricter than MIN_BLOB_AREA_PX so mask fragments/phantoms don't inflate the
+# per-zone count that PRE_CHECK/VERIFY compare. Calibrate on Thor: one cube at
+# top view should land well above this.
+ZONE_BLOB_MIN_AREA_PX = 800
+# Merged-blob guard: a blob LARGER than this is most likely two touching cubes
+# fused by the CLOSE kernel — its centroid is the seam between them, so it is
+# excluded from counting/targeting (logged). None disables; set to ~1.8x the
+# measured one-cube area on Thor.
+ZONE_BLOB_MAX_AREA_PX = None
+# Same guard for the wrist-camera servo view — WARN-ONLY (the servo keeps
+# tracking; suction feedback / VERIFY catch a failed seam grasp). None disables.
+SERVO_MAX_BLOB_AREA_PX = None
+
+# Reference "one clean cube" top-view area (mm² in px, calibrate on Thor from
+# a single unobstructed cube's logged blob area). Used only to decide whether
+# an oversized blob is worth attempting a touching-cube split: candidates in
+# roughly [1.5x, 3x] this area are tried; clearly-single or clearly-a-crowd
+# blobs are left alone.
+ONE_CUBE_AREA_PX = 3000
+
+# Zone-COUNTING-only shape/area gates — looser than the servo's grasp-time
+# gates (BLOB_MIN_SOLIDITY/BLOB_MAX_ASPECT below, MIN_BLOB_AREA_PX above): a
+# cube worth GRASPING should look clean, but a cube worth COUNTING may be
+# partially occluded or seen edge-on (mostly side face) because a neighbor is
+# touching it — PRE_CHECK/VERIFY/auto task-detection should still see it.
+ZONE_BLOB_MIN_SOLIDITY = 0.35
+ZONE_BLOB_MAX_ASPECT   = 4.5
+
+# --- VERIFY (count-delta) ---
+# VERIFY passes when the target zone GREW: blob count >= baseline+1, or —
+# when the dropped cube lands touching an existing one and the blobs merge —
+# pixel mass grew by at least this (~0.6 of a cube's top-view area).
+VERIFY_RECHECKS          = 2    # extra reads (0.5 s apart) before consuming a retry
+VERIFY_MASS_DELTA_MIN_PX = 900
+
+# --- Multi-cube eval ---
+EVAL_MAX_CUBES = 6   # safety cap on eval.py's drain-the-source-zone loop
+
+# --- Blended transport ---
+# Corner-blend radius for the TRANSPORT chain (horizontal arrival → descend):
+# the arm rounds the corner above the drop point instead of stopping. Keep
+# <= ~1/3 of the shortest adjacent segment or the controller may reject it.
+TRANSPORT_BLEND_RADIUS_MM = 30.0
+
+# get_inverse_kinematics has no fixed ref_angles, so its solvability verdict
+# for a Cartesian pose can shift with the arm's CURRENT joint configuration —
+# a drop point can look reachable while sampled (arm near the grasp pose) and
+# then fail its final pre-flight check (arm already lifted for transport).
+# On that pre-flight rejection (no motion committed — safe to retry), redraw
+# a fresh drop point and try again this many times before finally trying the
+# nominal ZONES point once as a last resort.
+TRANSPORT_IK_RETRIES = 3
+
+# --- Recovery: hold-through-retry ---
+# A mid-task fault does not have to mean dropping the cube: if check_grasp()
+# still reports (or can't rule out) a hold, RECOVERY re-attempts TRANSPORT
+# with a fresh drop point instead of releasing wherever the arm happened to
+# fault. Bounded so a persistently hostile zone still terminates (releasing
+# safely at HOME) instead of looping forever.
+MAX_RECOVERY_RETRIES = 2
+
+# --- Suction grasp feedback ---
+# When True, a FALSE reading from check_grasp() after the post-grasp lift
+# routes the FSM to RECOVERY instead of transporting an empty gripper.
+# Keep False until ~10 grasps of logged "Suction feedback raw:" values on
+# Thor confirm state==1 reliably tracks a real hold.
+GRASP_FEEDBACK_ENABLED = False
 
 # --- Depth-assisted perception (Orbbec local camera only) ---
 # The wrist camera views the cube at an angle, so the color blob includes the
@@ -194,14 +290,29 @@ MASK_FUSE_KERNEL_PX = 15
 # table-level phantoms (reflections/stains/shadows) no matter how red they look.
 OBJECT_MIN_HEIGHT_MM = 5.0
 
-# 3D metric servo gain: with depth + intrinsics + extrinsics the pixel error
-# converts to EXACT base-frame mm (no homography scale guess), so the gain can
-# run high; < 1 only damps sensor noise.
-SERVO_GAIN_3D = 0.35
+# --- Target estimate smoothing ---
+# The world-frame target estimate is an EMA over gated measurements: the
+# 45 mm match gate rejects outliers, the EMA averages down depth noise so
+# PBVS converges on a stable point instead of chasing per-frame jitter.
+TARGET_EMA_ALPHA = 0.4     # weight of each new gated measurement
+
+# --- Blob shape gates (lenient; reject glare streaks / cables, not cubes) ---
+# A cube seen top-down is compact: solidity (area / convex-hull area) near 1
+# and a squat minAreaRect. Bounds are deliberately loose so a half-shadowed
+# or angled cube still passes.
+BLOB_MIN_SOLIDITY = 0.65
+BLOB_MAX_ASPECT   = 2.5    # long side / short side of the minAreaRect
+
+# --- Ray-plane geometry (depth-free 2D→3D fallbacks) ---
+# The table plane's base-frame z is ESTIMATED from the top-view depth frame at
+# the start of each task (logged as "[Vision] Table plane z ≈ ..."); this
+# override is only for the day depth can't estimate it — copy the logged value.
+TABLE_Z_FALLBACK_MM = None
+# Nominal object height: ray-plane localization of a blob centroid intersects
+# the CUBE-TOP plane (table_z + this), since the visible centroid is the top face.
+OBJECT_HEIGHT_MM = 40.0
 
 # --- Debug/demo video recording (--video flag) ---
 VIDEO_FPS = 10   # mosaic recording rate; recorder runs in its own thread
 
 
-CAMERA_TO_GRIPPER_OFFSET_X = -70.0
-CAMERA_TO_GRIPPER_OFFSET_Y = 0.0

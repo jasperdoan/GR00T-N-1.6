@@ -31,6 +31,23 @@ def read_fresh(cap):
     return cap.retrieve()
 
 
+def read_fresh_after(cap, after_ts: float, timeout: float = 1.5):
+    """
+    Return a frame CAPTURED after `after_ts` (e.g. the completion time of the
+    last arm move) — the deterministic fix for stale-frame servoing: acting on
+    a frame taken mid-move systematically over-commands the next correction.
+    Polls until cap.last_frame_ts > after_ts or timeout, then falls back to
+    the newest frame with a log (never blocks the control loop forever).
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if getattr(cap, "last_frame_ts", 0.0) > after_ts:
+            return read_fresh(cap)
+        time.sleep(0.01)
+    print(f"[Vision] No post-move frame within {timeout:.1f}s — using the newest one.")
+    return read_fresh(cap)
+
+
 # =============================================================================
 # Network MJPEG stream (color only)
 # =============================================================================
@@ -49,6 +66,7 @@ class StreamCamera:
     intrinsics = None
 
     def __init__(self, url: str, name: str = "camera"):
+        self.last_frame_ts = 0.0
         self._cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         if not self._cap.isOpened():
             raise RuntimeError(
@@ -79,6 +97,7 @@ class StreamCamera:
             if ret:
                 with self._lock:
                     self._ret, self._frame = True, frame
+                    self.last_frame_ts = time.time()
             else:
                 time.sleep(0.01)   # stream hiccup; don't spin at 100% CPU
 
@@ -170,6 +189,7 @@ class OrbbecCamera:
         self._lock = threading.Lock()
         self._color: Optional[np.ndarray] = None
         self._depth: Optional[np.ndarray] = None
+        self.last_frame_ts = 0.0
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -224,6 +244,7 @@ class OrbbecCamera:
                 with self._lock:
                     self._color = bgr
                     self._depth = depth
+                    self.last_frame_ts = time.time()
             except Exception:
                 time.sleep(0.01)   # transient SDK hiccup; keep the thread alive
 
