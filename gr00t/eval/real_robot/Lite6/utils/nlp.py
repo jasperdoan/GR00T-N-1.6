@@ -4,7 +4,11 @@ Extracts task_type and target_object from a natural language instruction string.
 """
 
 import re
-from utils.constants import ZONES, KNOWN_OBJECTS
+from utils.constants import ZONES, KNOWN_OBJECTS, COLOR_RANGES
+
+# Fallback color words are the detectable colors: a color word that parses but
+# has no HSV range would just produce an all-zero mask downstream.
+_COLOR_WORD_RE = re.compile(r"\b(" + "|".join(COLOR_RANGES.keys()) + r")\b")
 
 # Maps spoken task phrases to internal task_type keys
 _TASK_ALIASES = {
@@ -50,7 +54,7 @@ def parse_instruction(instruction: str):
 
     if target_object is None:
         # Fallback: extract color + "cube" heuristically
-        color_match = re.search(r"\b(red|blue|yellow|green|orange|pink|purple|black|white)\b", text)
+        color_match = _COLOR_WORD_RE.search(text)
         if color_match:
             target_object = color_match.group(1) + " cube"
         else:

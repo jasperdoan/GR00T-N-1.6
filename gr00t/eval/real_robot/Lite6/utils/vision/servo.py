@@ -249,9 +249,10 @@ def visual_servo_to_grasp(
     extrinsics=None,
     target_base=None,
     avoid_xy=None,
-) -> Tuple[bool, Optional[float], Optional[Tuple[float, float]]]:
+) -> Tuple[bool, Optional[float], Optional[Tuple[float, float]], Optional[float]]:
     """
-    PBVS alignment over the target cube. Returns (locked, angle_deg, grasp_xy):
+    PBVS alignment over the target cube. Returns (locked, angle_deg, grasp_xy,
+    est_z):
       - locked:   True once the TCP sits over the grasp point within
                   PBVS_TOL_MM for PBVS_CONFIRM_FRAMES fresh frames, verified
                   from the PBVS_REFINE_Z_MM stage.
@@ -260,6 +261,10 @@ def visual_servo_to_grasp(
       - grasp_xy: the base-frame (x, y) the descend should target — the
                   final measured cube position + TOOL_OFFSET. None when not
                   locked.
+      - est_z:    the tracker's base-frame estimate of the cube's TOP-FACE
+                  height (EMA over gated metric measurements, including the
+                  refine stage) — the caller's depth-adaptive descend input.
+                  May be None even when locked (pixel-tier-only tracking).
 
     target_base: (x, y, z|None) base-frame mm of the SCANNING-chosen cube.
     avoid_xy: [(x, y), ...] of cubes already sitting in the task's target zone.
@@ -268,10 +273,10 @@ def visual_servo_to_grasp(
     if intrinsics is None or extrinsics is None:
         print("[Vision] Grasping requires the local Orbbec (intrinsics) + "
               "calibrated extrinsics (script/lite6_extrinsics.py) — aborting.")
-        return False, None, None
+        return False, None, None, None
     if target_base is None:
         print("[Vision] No target identity from SCANNING — aborting.")
-        return False, None, None
+        return False, None, None, None
 
     color_name = target_object.split()[0].lower()
     tracker = _TargetTracker(target_base, avoid_xy)
@@ -290,17 +295,17 @@ def visual_servo_to_grasp(
     # walking toward an impossible point.
     pos = robot.get_current_position()
     if pos is None:
-        return False, None, None
+        return False, None, None, None
     gx, gy = grasp_target()
     if not (robot.in_workspace(gx, gy, pos[2]) and robot.in_workspace(gx, gy, GRASP_Z)):
         print(f"[Vision] Cube unreachable — grasp TCP ({gx:.1f}, {gy:.1f}) is "
               f"outside the workspace envelope. Aborting.")
-        return False, None, None
+        return False, None, None, None
     if not (robot.is_pose_reachable(gx, gy, pos[2])
             and robot.is_pose_reachable(gx, gy, GRASP_Z)):
         print(f"[Vision] Cube unreachable — grasp TCP ({gx:.1f}, {gy:.1f}) is "
               f"outside the kinematic reach sphere. Aborting.")
-        return False, None, None
+        return False, None, None, None
 
     start_time = time.time()
     confirm = 0
@@ -313,13 +318,13 @@ def visual_servo_to_grasp(
     while True:
         if should_stop_cb and should_stop_cb():
             print("[Vision] Stop requested during PBVS alignment.")
-            return False, None, None
+            return False, None, None, None
         if time.time() - start_time > timeout:
             print("[Vision] PBVS alignment TIMEOUT.")
-            return False, None, None
+            return False, None, None, None
         if robot.has_error():
             print("[Vision] Arm in error state during PBVS alignment — aborting.")
-            return False, None, None
+            return False, None, None, None
 
         # Measure only on frames captured AFTER the last move finished.
         ret, frame_bgr = read_fresh_after(cap, last_move_end, FRAME_FRESH_TIMEOUT_S)
@@ -341,7 +346,7 @@ def visual_servo_to_grasp(
             if time.time() - last_seen > LOST_TARGET_GRACE_S:
                 print("[Vision] Target lost — aborting for an FSM re-scan "
                       "(the world matcher will not adopt a different cube).")
-                return False, None, None
+                return False, None, None, None
             time.sleep(0.05)
             continue
 
@@ -369,7 +374,7 @@ def visual_servo_to_grasp(
                     if not robot.move_to(gx, gy, PBVS_REFINE_Z_MM,
                                          speed=FINE_ADJUST_SPEED, wait=True):
                         print("[Vision] Refine descend failed — aborting.")
-                        return False, None, None
+                        return False, None, None, None
                     last_move_end = time.time()
                 continue
             residual = tracker.residual_mm()
@@ -378,14 +383,14 @@ def visual_servo_to_grasp(
                   f"Calibration health: scan→final residual "
                   f"{residual:.1f} mm." if residual is not None else
                   f"[Vision] PBVS LOCKED at ({gx:.1f}, {gy:.1f}).")
-            return True, last_angle, (gx, gy)
+            return True, last_angle, (gx, gy), tracker.est_z
         confirm = 0
 
         iters += 1
         if iters > PBVS_MAX_ITERS:
             print(f"[Vision] PBVS move budget ({PBVS_MAX_ITERS}) exhausted at "
                   f"err {err:.1f} mm — aborting for a re-scan.")
-            return False, None, None
+            return False, None, None, None
 
         step_x = clamp(PBVS_DAMPING * err_x, PBVS_MAX_STEP_MM)
         step_y = clamp(PBVS_DAMPING * err_y, PBVS_MAX_STEP_MM)
@@ -395,14 +400,14 @@ def visual_servo_to_grasp(
             # this only fires if the estimate escaped the envelope mid-run.
             print(f"[Vision] PBVS step target ({tx:.1f}, {ty:.1f}) left the "
                   f"envelope — aborting.")
-            return False, None, None
+            return False, None, None, None
 
         print(f"[Vision] PBVS iter {iters}: cube at ({tracker.est_xy[0]:.1f}, "
               f"{tracker.est_xy[1]:.1f}) [match {tracker.last_match}] — "
               f"err {err:.1f} mm → move ({step_x:+.1f}, {step_y:+.1f}).")
         if not robot.move_to(tx, ty, pos[2], speed=FINE_ADJUST_SPEED, wait=True):
             print("[Vision] PBVS correction move failed (rejected/faulted) — aborting.")
-            return False, None, None
+            return False, None, None, None
         last_move_end = time.time()
 
     return False, None, None

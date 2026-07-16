@@ -46,6 +46,23 @@ PLACE_SAMPLE_ATTEMPTS  = 20    # rejection-sampling budget before falling back
 PLACE_MIN_FALLBACK_CLEARANCE_MM = 25.0  # best-effort sample must at least clear
                                         # a cube footprint, else use the nominal spot
 
+# --- Free-space drop planning (the work surface is WHITE) ---
+# The PRIMARY drop-point chooser detects emptiness directly instead of
+# inferring it from the color census: white(-ish) pixels inside the target
+# zone ROI are free space, everything else — a cube of ANY color (known to
+# COLOR_RANGES or not), a stray object, a shadow — is occupied. A distance
+# transform then finds the free pixel farthest from every occupied pixel AND
+# from the zone boundary, so the drop lands as deep in open space as the zone
+# allows (spread out, never against an edge). The random sampler above remains
+# only as the fallback when this analysis is unavailable (no table-z) or its
+# point is kinematically unreachable.
+FREE_SPACE_S_MAX = 70    # HSV saturation ceiling for "white table" pixels
+FREE_SPACE_V_MIN = 120   # HSV value floor for "white table" pixels (deep
+                         # shadow fails this → reads occupied → conservative)
+PLACE_FREE_MIN_CLEARANCE_MM = 30.0  # min distance from the drop CENTER to the
+                                    # nearest occupied pixel / zone edge (half a
+                                    # cube ~20 + margin); below this = zone FULL
+
 DEFAULT_TASK  = "check_in"
 SCAN_INTERVAL = 3.0  # seconds between scans when idle
 
@@ -75,6 +92,26 @@ TRANSPORT_Z_MM = 220.0  # post-grasp lift + carry height: reach-safe across the
                         # cubes (~45mm) plus the held payload.
 # Height to execute the actual grasp
 GRASP_Z = 105
+
+# --- Depth-adaptive grasp height ---
+# GRASP_Z is the empirically correct TCP height for a NOMINAL cube (top face at
+# table_z + OBJECT_HEIGHT_MM). When enabled, the FINE_GRASP descend shifts
+# GRASP_Z by the DIFFERENCE between the depth-measured top face (PBVS est_z,
+# EMA over refine-stage frames; SCANNING's 3D fix as fallback) and the nominal
+# top — short cubes get a deeper press, tall objects a higher stop. The clamps
+# are asymmetric on purpose: lowering is capped hard by the workspace floor
+# (WORKSPACE_Z_RANGE[0] = 100 leaves only 5 mm under GRASP_Z — raise both
+# together only after physically checking the suction tip can't strike the
+# table), while raising has generous headroom so we never crush an
+# unexpectedly tall object.
+GRASP_DEPTH_ADAPT_ENABLED = True
+GRASP_Z_MAX_LOWER_MM = 7.5
+GRASP_Z_MAX_RAISE_MM = 30.0
+# The depth measurement lands pin-point on the object's surface, which isn't
+# enough travel for the suction cup to seat (Thor testing: consistently a few
+# mm short / hovering). Press this far PAST the measured/nominal surface on
+# every descend — adaptive or fixed-fallback alike. Tune directly on Thor.
+GRASP_PRESS_DOWN_MM = 5.0
 # Default Home Position [X, Y, Z, Roll, Pitch, Yaw]
 HOME_POSE = [0.0, -150.0, 200.0, -180.0, 0.0, 0.0]
 TOP_VIEW_POSE = [0.0, -150.0, 450.0, -180.0, 0.0, 0.0]
@@ -84,7 +121,7 @@ TOP_VIEW_POSE = [0.0, -150.0, 450.0, -180.0, 0.0, 0.0]
 # so a bad detection can't fault the arm by driving it out of reach.
 WORKSPACE_X_RANGE = (-220.0, 90.0)
 WORKSPACE_Y_RANGE = (-395.0, -75.0)
-WORKSPACE_Z_RANGE = (100.0, 510.0)
+WORKSPACE_Z_RANGE = (95, 510.0)
 
 
 # --- Zone Definitions (Robot Cartesian Coordinates in mm) ---
@@ -112,17 +149,36 @@ ALL_ZONES_DICT = {
 
 
 # --- Language & Vision Definitions ---
-KNOWN_OBJECTS = ["red cube", "blue cube", "yellow cube", "green cube"]
+KNOWN_OBJECTS = [
+    "red cube", "blue cube", "yellow cube", "green cube",
+    "orange cube", "pink cube", "purple cube",
+]
 
 # HSV Color Ranges (Lower Bound, Upper Bound)
 # Red's V floor is 60 (not 100): during the final grasp approach the gripper
 # casts a shadow on the cube and V drops — a V>=100 floor made the cube vanish
 # from detection precisely at the grasp pose.
+#
+# CONTRACT: ranges must stay pairwise disjoint in (H, S) space — the all-color
+# zone census (occupancy for drop clearance / zone-full detection) sums blobs
+# across colors, and overlapping ranges would double-count a single cube.
+# Neighboring boundaries are pure HUE splits: red|orange at H 8/9,
+# orange|yellow at 19/20, blue|purple at 128/129, purple|pink at 155/156,
+# pink|red at 172/173 (a saturation split was tried first, but the production
+# enhance_saturation(1.4) boost pushes real pinks past any workable S ceiling
+# and they read as red). Trade-off: a shadowed red cube whose hue drifts
+# below 173 reads as pink — if that shows up on hardware, move the 172/173
+# split down rather than re-overlapping the ranges.
+# These are starting values: masks are computed AFTER enhance_saturation(1.4),
+# so calibrate on hardware with the snapshot tool before trusting them.
 COLOR_RANGES = {
-    "red":    [((0, 100, 60), (10, 255, 255)), ((160, 100, 60), (180, 255, 255))],
-    "blue":   [((100, 150, 50), (140, 255, 255))],
+    "red":    [((0, 100, 60), (8, 255, 255)), ((173, 100, 60), (180, 255, 255))],
+    "orange": [((9, 120, 100), (19, 255, 255))],
     "yellow": [((20, 100, 100), (30, 255, 255))],
     "green":  [((40, 50, 50), (90, 255, 255))],
+    "blue":   [((100, 150, 50), (128, 255, 255))],
+    "purple": [((129, 60, 60), (155, 255, 255))],
+    "pink":   [((156, 40, 100), (172, 255, 255))],
 }
 
 # --- PBVS (Position-Based Visual Servoing / industrial look-then-move) ---
@@ -311,6 +367,11 @@ TABLE_Z_FALLBACK_MM = None
 # Nominal object height: ray-plane localization of a blob centroid intersects
 # the CUBE-TOP plane (table_z + this), since the visible centroid is the top face.
 OBJECT_HEIGHT_MM = 40.0
+
+# Depth-adaptive grasp sanity band: the measured height-above-table of the
+# object's top face must fall inside this band, else the depth estimate is
+# treated as garbage and the descend falls back to the fixed GRASP_Z.
+GRASP_TOP_SANE_BAND_MM = (OBJECT_MIN_HEIGHT_MM, 90.0)
 
 # --- Debug/demo video recording (--video flag) ---
 VIDEO_FPS = 10   # mosaic recording rate; recorder runs in its own thread

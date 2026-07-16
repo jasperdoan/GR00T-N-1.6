@@ -1,145 +1,165 @@
 # `LITE6_HYBRID_CV_ARCHITECTURE.md`
 
 ## 1. System Overview & Philosophy
-This project operates a UFACTORY Lite 6 robotic arm for pick-and-place tasks. It mimics the state-machine logic of the previous **SO ARM 101** system (supporting NLP-driven `eval` tasks and continuous `auto` tasks like *Check In*, *Check Out*, and *Check Back*). 
+This project operates a UFACTORY Lite 6 robotic arm for pick-and-place tasks. It implements the state-machine logic of the previous **SO ARM 101** system (supporting NLP-driven `eval` tasks and continuous `auto` tasks like *Check In*, *Check Out*, and *Check Back*). 
 
-However, it **deprecates End-to-End Neural Policies (VLAs)**. VLAs traditionally cause heavy jitter, require GPUs, and struggle with millimeter precision. Instead, this system uses a **Deterministic Hybrid Computer Vision Pipeline**, or also known as Image-Based Visual Servoing (IBVS).
+The system relies on a **Deterministic 3D Position-Based Visual Servoing (PBVS)** pipeline. It replaces the classic 2D Homography matrix and pixel-chasing Image-Based Visual Servoing (IBVS) with metric, camera-pose-independent 3D reasoning. By integrating aligned depth sensing with known camera intrinsics and hand-eye extrinsics, the robot represents the workspace directly in the 3D robot base frame.
 
 ### The Hybrid Approach:
-1. **Global Phase (Top-Down Camera):** Fast, math-based localization using a Homography Matrix to map pixels to real-world millimeters. Moves the arm rapidly to the general vicinity.
-2. **Local Phase (Wrist Camera):** Real-time Visual Servoing (Proportional Control) to perfectly center the gripper over the object, eliminating jitter and ensuring a flawless grasp.
+1. **Global Phase (Top-Down Wrist View):** The arm parks at a high home position (`TOP_VIEW_POSE` at $Z = 450\text{mm}$). Color-segmented blobs are located in 3D by deprojecting depth or intersecting pixel rays with an estimated table plane. The arm then travels rapidly to the approach height (`APPROACH_Z_MM` at $Z = 250\text{mm}$).
+2. **Local Phase (Wrist Camera PBVS):** Hovering above the target, the eye-in-hand camera continually measures the object's position in the robot base frame using per-blob depth deprojection. The controller commands the Tool Center Point (TCP) directly to the estimated base-frame target coordinates (damped and step-clamped) instead of chasing pixel offsets.
 
 ---
 
-## 2. Setup & Calibration (The Homography Matrix)
-Before the system can run, the top-down camera's perspective must be mapped to the robot's physical 2D Cartesian plane ($X, Y$). 
+## 2. Geometry, Calibration & Extrinsics
+The entire pixel-to-robot coordinate mapping is governed by projective geometry and a rigid 3D transform, removing the restriction of a static calibration pose.
 
-**How it is done:**
-1. A ChArUco board is placed flat on the table.
-2. The user runs the interactive calibration script (`script/lite6_homography.py`).
-3. The user clicks 4 corners on the camera image, capturing pixel coordinates $(u, v)$.
-4. The user physically moves the Lite 6 gripper to touch those same 4 corners, recording robot base coordinates $(X_{mm}, Y_{mm})$.
-5. OpenCV calculates a 3x3 transformation matrix ($H$) using `cv2.findHomography`.
-6. This matrix is saved as `homography_matrix.npy`. Any future pixel coordinate $(u, v)$ can now be multiplied by $H$ to instantly yield the exact robot $X, Y$ coordinate.
+### 2.1. Pinhole Camera Models
+Using the color camera intrinsics $(f_x, f_y, c_x, c_y)$ provided by the Orbbec SDK, any pixel coordinate $(u, v)$ with a known depth $d$ (in mm) is deprojected to its camera-frame coordinates $(X_c, Y_c, Z_c)$ via:
+$$X_c = \frac{(u - c_x) \cdot d}{f_x}, \quad Y_c = \frac{(v - c_y) \cdot d}{f_y}, \quad Z_c = d$$
+
+Conversely, any 3D camera-frame point is projected back to pixel space using:
+$$u = \frac{X_c \cdot f_x}{Z_c} + c_x, \quad v = \frac{Y_c \cdot f_y}{Z_c} + c_y$$
+
+### 2.2. Camera-to-Base Extrinsics
+Because the camera is rigidly mounted to the wrist and the system keeps a fixed tool orientation (roll/pitch/yaw = $-180/0/0$) during all sensing operations, the relationship between a camera-frame coordinate $p_{cam}$ and the robot base-frame coordinate $p_{base}$ at any given TCP position $p_{tcp}$ is:
+$$p_{base} = p_{tcp} + R \cdot p_{cam} + t$$
+where $R$ is a constant $3 \times 3$ rotation matrix and $t$ is a constant $3 \times 1$ translation vector. These parameters are calibrated using SVD-based Kabsch rigid registration (`script/lite6_extrinsics.py`) over paired physical measurements and are stored in `data/extrinsics.npz`.
+
+### 2.3. Dynamic Table Height Estimation
+When the robot is parked at `TOP_VIEW_POSE`, the table plane $Z_{table}$ in the robot base frame is estimated dynamically from the aligned depth frame. The system samples the depth values corresponding to the background (determined as the 90th percentile of valid depths), deprojects them, and transforms them to the base frame. This estimated $Z$ plane provides:
+*   A ground plane for depth-gating (removing table-level reflections).
+*   A ray-intersection plane (`pixel_to_base_on_plane`) for depth-free 3D fallback localization.
 
 ---
 
 ## 3. The Core Pipeline: Step-by-Step
 
-Every time the robot attempts to pick an object, it executes the following **Finite State Machine (FSM)**.
-
 ### STEP 1: NLP parsing (Eval Mode Only)
-* **Action:** The system receives a natural language string (e.g., `"check in red cube"`).
-* **Process:** Regex parsing extracts the `task_type` (check_in) and the `target_object` (red cube).
+*   **Action:** Receives a natural language instruction (e.g., `"check out blue cube"`).
+*   **Process:** Parses task intent and target color using predefined task aliases and HSV color range keys.
 
-### STEP 2: The Global Snapshot (State: `SCANNING`)
-* **Action:** The top-down camera takes a single snapshot of the workspace.
-* **Process:** OpenCV applies HSV color thresholding (e.g., looking for red) to isolate the object. It draws a contour around the blob and calculates the geometric centroid/moments to find the exact center pixel: $(u, v)$.
+### STEP 2: Pre-Check & Target Verification (State: `PRE_CHECK`)
+*   **Action:** Verifies target presence and maps workspace occupancy before initiating physical motion.
+*   **Process:**
+    1. The arm moves to `TOP_VIEW_POSE` to capture a global RGB-D image.
+    2. The system filters the target color mask within the specific `source_zone` pixel ROI.
+    3. Proceeds if the pixel mass exceeds `FRONT_MIN_PRESENCE_PX` (1500 px).
+    4. Records the baseline target color count and pixel mass in the `target_zone` to allow verification of delivery later.
+    5. Runs a multi-color census across the target zone to map occupied $(X, Y)$ coordinate points of existing cubes. This map is used for obstacle avoidance and drop-point planning.
+    6. Conducts a **Free-Space Drop-Point Analysis** (see Step 5). If the target zone is determined to be fully occupied, the FSM flags this state early.
 
-### STEP 3: Coordinate Translation (State: `GLOBAL_APPROACH`)
-* **Action:** The system translates pixels to millimeters.
-* **Process:** The pixel $(u, v)$ is passed through the Homography Matrix. The output is a real-world robot coordinate: e.g., $X = 310.5\text{mm}, Y = -120.2\text{mm}$.
-* **Execution:** The Lite 6 uses its native, buttery-smooth trajectory planner to move to $(X, Y, Z_{safe})$. $Z_{safe}$ is a predefined height (e.g., $150\text{mm}$) ensuring the arm travels *above* all obstacles.
+### STEP 3: Top-Down Localization (State: `SCANNING`)
+*   **Action:** Selects a target cube and determines its initial coordinates.
+*   **Process:**
+    1. Locates all target-color blobs within the source zone ROI.
+    2. If multiple candidates exist, selects one at random to distribute picks in multi-object tasks.
+    3. **3D Localization:** Isolates the chosen blob's contour, applies a morphological close to fuse split fragments, and computes the median 3D camera-frame position of its top face (using a localized depth-based top-face mask). Converts this to base-frame coordinates.
+    4. **Ray-Plane Fallback:** If depth is invalid, intersects the camera ray of the blob's 2D centroid with the plane $Z = Z_{table} + \text{OBJECT\_HEIGHT\_MM}$ to resolve the coordinate point.
+    5. Verifies that the targeted $(X, Y)$ is inside `WORKSPACE` boundaries and reachable by the kinematics solver.
 
-### STEP 4: Visual Servoing (State: `FINE_GRASP`)
-* **Action:** The arm is now hovering above the object, but due to slight calibration errors or object height, it might be off by a few centimeters. The **Wrist Camera** takes over.
-* **Process:**
-  1. The wrist camera continually captures frames at ~30fps.
-  2. It detects the target object and finds its center pixel.
-  3. It calculates the **Error**: The distance between the object's center pixel and the *exact center of the camera frame*.
-  4. **P-Controller:** It multiplies this pixel error by a proportional gain ($K_p$, e.g., 0.08) to get a tiny movement delta in millimeters ($dX, dY$).
-  5. The arm moves by $(dX, dY)$ and takes another picture.
-  6. This loop repeats rapidly until the error is $< 10$ pixels (the object is dead center).
-* **Execution:** Once centered, the robot lowers straight down on the Z-axis to $Z_{grasp}$ (e.g., $30\text{mm}$), closes the gripper, and lifts back to $Z_{safe}$.
+### STEP 4: Global Approach (State: `GLOBAL_APPROACH`)
+*   **Action:** Rapid transit to the approach hover position.
+*   **Process:** Commands the robot to move to $(X_{target}, Y_{target}, \text{APPROACH\_Z\_MM})$ at $200\text{mm/s}$.
 
-### STEP 5: Scripted Transport (State: `TRANSPORT`)
-* **Action:** The robot moves the object to its final destination based on the task type.
-* **Process:** The system looks up the hardcoded $(X, Y)$ drop-off coordinates for the specified zone, moves there at $Z_{safe}$, descends, opens the gripper, and returns to the `HOME` position.
+### STEP 5: Position-Based Visual Servoing (State: `FINE_GRASP`)
+*   **Action:** Closed-loop 3D centering and grasp execution.
+*   **Process:**
+    1. **Target Tracking:** An instance of `_TargetTracker` maintains a running estimate of the cube's base coordinates using an Exponential Moving Average (EMA) with $\alpha = 0.4$.
+    2. **Frame Freshness Guard:** To prevent overshooting, the FSM polls the camera and discards frames captured *before* the previous movement ended.
+    3. **Multi-Object Gating:** From the approach view, candidates are deprojected to the base frame. The tracker matches only the candidate within $45\text{mm}$ of the running target estimate and rejects any candidate within $40\text{mm}$ of already-delivered cubes. If depth drops out, it falls back to matching the nearest candidate within $120\text{px}$ of the projected target coordinate.
+    4. **Metric P-Control:** Computes the distance error between the current TCP coordinate and the matched cube's measured base-frame coordinate. Applies proportional damping (correction step $= 0.75 \times \text{error}$) clamped to a maximum step of $60\text{mm}$.
+    5. **Two-Stage Refinement:** Once the error is within $2.5\text{mm}$ at hover, the arm descends to `PBVS_REFINE_Z_MM` ($250\text{mm}$, skipped if already at approach height), re-measures from the shorter focal distance to minimize angular tilt errors, and locks when consecutive frames stay within tolerance.
+    6. **Yaw Alignment:** Evaluates the target's rotation in the final image frame. Rotates the gripper joint to align with the object's principal axis.
+    7. **Depth-Adaptive Descend:** Instead of descending to a fixed Z height, the robot calculates the target's measured top-face base $Z$. It shifts the nominal `GRASP_Z` ($105\text{mm}$) by the target's height deviation from nominal, applies asymmetric safety clamps, and adds a `GRASP_PRESS_DOWN_MM` ($5\text{mm}$) offset to compress the suction cup.
+    8. **Grasp & Lift:** Activates the vacuum line, dwells for $3.0\text{s}$ to establish suction, and lifts to `TRANSPORT_Z_MM` ($220\text{mm}$).
+    9. **Vacuum Feedback:** Queries the physical sensor (`get_suction_cup`). If vacuum flow reads $0$ (indicating no object is held), the system routes directly to `RECOVERY`.
 
----
+### STEP 6: Transport and Drop-off Planning (State: `TRANSPORT` / `RETURNING`)
+*   **Action:** Places the object in a clear spot or returns it if the target zone is full.
+*   **Process:**
+    1. **Free-Space Drop-Point Selection:** Operates primarily on the free-space plan established during `PRE_CHECK`. It extracts HSV pixels matching the white table, masks out the boundaries and existing obstacles, applies a distance transform, and selects the coordinate point furthest from all obstacles.
+    2. **Randomized Fallback:** If the free-space plan is unavailable, it samples random coordinates inside the zone's base-frame bounding box, requiring a minimum clearance of $45\text{mm}$ from all occupied coordinates.
+    3. **Kinematic Pre-Flight:** Verifies the IK solvability of the planned trajectory before starting movement. If the solver fails, it re-samples up to 3 times before falling back to the nominal zone center.
+    4. **Blended Path Execution:** Executes the carry and descent as a single, continuous trajectory. The horizontal arrival at the drop coordinate and the vertical descent are blended using a corner fillet radius (`TRANSPORT_BLEND_RADIUS_MM` = $30\text{mm}$) to prevent intermediate stops.
+    5. **Suction Release:** De-energizes the vacuum, vents the lines, dwells for $1.5\text{s}$, and returns the arm to `TRANSPORT_Z_MM`.
+    6. **The `RETURNING` Alternate Path:** If the target zone is determined to be full, the robot carries the cube back to its original pickup coordinate, places it down at its measured grasp height, and terminates in the `DONE_RETURNED` state.
 
-## 4. Operational Modes (Task Semantics)
-
-Just like the SO ARM 101 codebase, this system organizes logical tasks into physical zones. The zones are pre-defined physical coordinates mapped in `modules/constants.py`.
-
-### The Zones:
-* **Check-In Zone:** The intake area where new items arrive.
-* **Storage Zone:** The main warehousing/holding area.
-* **Check-Out Zone:** The outbound area where items are dispatched.
-
-### Task Dictionary:
-* **`check_in`**: Object is picked from *Check-In Zone* (or anywhere on the table) and transported to the *Storage Zone*.
-* **`check_out`**: Object is picked from the *Storage Zone* and transported to the *Check-Out Zone*.
-* **`check_back`**: Object is returned from the *Check-Out Zone* to the *Check-In Zone*.
-
----
-
-## 5. Execution Scripts
-
-### `eval.py` (Instruction-Driven)
-Designed for single-shot, directed operations. 
-* **Input:** Command line argument (e.g., `python eval.py --instruction "check in blue cube"`).
-* **Flow:** Parses the instruction, runs the FSM once for that specific object and task, returns home, and exits.
-
-### `auto.py` (Continuous Loop)
-Designed for endless, autonomous workspace sorting.
-* **Input:** None (`python auto.py`).
-* **Flow:** 
-  1. Sweeps the top-down camera frame for *any* known object in the `KNOWN_OBJECTS` list.
-  2. If it sees a target, it automatically assigns a default task (e.g., `check_in`), runs the FSM to move it to storage.
-  3. Returns home, sleeps for 3 seconds, takes another picture, and repeats endlessly until terminated via `Ctrl+C`.
+### STEP 7: Verification (State: `VERIFY`)
+*   **Action:** Confirms delivery.
+*   **Process:** Re-parks at `TOP_VIEW_POSE`. Compares target zone occupancy against the baseline captured in `PRE_CHECK`. Verification passes if the target-color count increased by $\ge 1$ or if the total target-color pixel mass increased by $\ge 900\text{px}$ (detecting cases where the dropped cube landed touching an existing one, merging the contours).
 
 ---
 
-## 6. File Architecture Overview
-If expanding or debugging the code, refer to this structure:
+## 4. Error Recovery & Safety Features
 
-* `README.md` - Setup and run instructions.
-* `eval.py` - Single-shot NLP evaluation script.
-* `auto.py` - Continuous autonomous script.
-* `script/lite6_homography.py` - Standalone interactive calibration tool.
-* `modules/`
-  * `constants.py` - Single source of truth (IP, camera IDs, Z-heights, Zone X/Y coords, Color thresholds).
-  * `system.py` - OS signals (Graceful Ctrl+C exiting).
-  * `nlp.py` - Regex string parsing for Eval mode.
-  * `robot.py` - Wrapper class for `xArmAPI` (connect, move, gripper control).
-  * `vision.py` - Computer Vision logic (Homography math, color masking, contour tracking, Visual Servoing P-Controller loop).
-  * `fsm.py` - The Finite State Machine bridging Vision and Robot commands.
+```
+          [Move Fault / Loss of Vacuum]
+                        │
+                        ▼
+               [Check check_grasp()]
+               /                   \
+        (Still Held)           (Empty/Lost)
+             /                       \
+  [Increment Recovery Retry]       [Stop Vacuum]
+  [Lift Vertically to Carry Z]     [Safe Home Transit]
+  [Re-Plan Drop to Destination]    [Increment Search Retry]
+  [Resume TRANSPORT/RETURNING]     [FSM State -> SCANNING]
+```
+
+### 4.1. Hold-Through-Retry Recovery
+If a movement command is interrupted or fails mid-transit, the robot clears the error and queries the vacuum payload sensor before releasing the object.
+*   If `check_grasp()` indicates the payload is still held, the robot performs a vertical-only recovery lift to safe carry height, marks the previous drop coordinates as obstructed, re-samples a fresh drop-off coordinate, and resumes `TRANSPORT` (or `RETURNING`).
+*   This recovery loop is allowed up to `MAX_RECOVERY_RETRIES` (2), preventing the robot from dropping held cubes in untracked workspace locations during transient faults.
+
+### 4.2. Safe Home Transit
+If the payload is confirmed lost or if the recovery retries are exhausted, the robot vents the suction line, executes a slow, direct transit back to `HOME_POSE`, increments the task's general search retry counter, and restarts from `SCANNING` (up to `max_retries`).
+
+### 4.3. Failure Signalling
+If a task fails permanently (e.g., the source zone is empty during `PRE_CHECK` or search retries are exhausted), the robot moves to its current height's center and performs a joint-limit-safe "no-no shake" (rotating the wrist axis back and forth by $\pm 12^\circ$) to visually signal the failure before halting.
+
+### 4.4. Graceful Soft Stop
+*   **Signal Handlers:** Standard SIGINT (Ctrl+C) and SIGTERM are caught by `system.py` to raise a soft-stop flag.
+*   **Interruption Rules:**
+    *   During non-committed phases (`PRE_CHECK`, `SCANNING`, `GLOBAL_APPROACH`, and active alignment in `FINE_GRASP`), a soft stop halts motion immediately, aborts the FSM, and executes a controlled transit back to `HOME_POSE`.
+    *   During committed phases (descending, active vacuum gripping, `TRANSPORT`, `RETURNING`, and releasing), the soft stop is ignored. The FSM completes the current pick, transport, and drop-off sequence to deliver the payload safely before returning to `HOME_POSE` and shutting down.
+*   **Hard Stop Fallback:** If the user triggers SIGINT a second time, the system calls `os._exit(1)` immediately, functioning as a software emergency stop.
 
 ---
 
-## 7. Baseline Logic Alignment & Critical Safety Features (SO ARM Match)
+## 5. File Architecture
 
-To maintain absolute behavioral consistency with the original SO ARM codebase, the orchestration and safety logic must be ported exactly. The only differences are how the physical arm is commanded (Cartesian `xarm-python-sdk` vs. joint-space degrees) and the camera translation setup. 
+*   `auto.py` — Continuous autonomous sorting loop. Manages task selection priority, task-blocking for full zones, and empty-workspace shutdown.
+*   `eval.py` — Multi-object single-instruction evaluation script. Parses NLP input and drains all matching objects from the source zone up to a safety limit (`EVAL_MAX_CUBES` = 6).
+*   `utils/`
+    *   `constants.py` — Single source of truth containing cartesian boundaries, zone ROIs, color thresholds, and PBVS gain values.
+    *   `system.py` — Inter-process communication flags and soft/hard signal handling.
+    *   `nlp.py` — Regex parsing of commands into task types and target colors.
+    *   `robot.py` — Wrapper for the `XArmAPI`. Handles motion safety, pose reachability checks, and GPIO-driven suction cup states.
+    *   `vision/`
+        *   `camera.py` — Stream and Orbbec camera drivers. Integrates a frame-timestamp tracking thread to guarantee frame freshness.
+        *   `detection.py` — HSV thresholding, morphological fragment fusion, touching-blob watershed segmentation, and depth-based top-face masking.
+        *   `localize3d.py` — Geometric coordinate math. Includes pinhole camera projection, 3D point cloud localization, and table height estimation.
+        *   `servo.py` — Position-Based Visual Servoing. Implements the target tracker, candidate matching, and metric alignment loops.
+        *   `recorder.py` — Real-time diagnostics. Generates a 2x2 MP4 video mosaic during runs.
+        *   `snapshot.py` — Generates before/after workspace images with annotated zone boundaries and detected object contours.
 
-The following critical system-level features must be implemented precisely as they were in the SO ARM setup:
+---
 
-### 7.2. Graceful Shutdown & Signal Handling
-*   **The Mechanism:** Standard Ctrl+C (SIGINT) or SIGTERM must not result in the Lite 6 dropping payloads or locking up in an awkward position.
-*   **The Logic:**
-    *   Signal handlers catch exit requests and raise a soft-stop flag.
-    *   The FSM and `_safe_move` poll `should_stop_cb` at every state boundary and inside the move loop. On a soft stop, the current non-blocking move is paused, the FSM aborts to `FAILED`, and the `finally` block in `eval.py` / `auto.py` executes a controlled transit back to `HOME_POSE`, disconnects the API cleanly, and removes the `/tmp` flags.
-    *   If a user hits Ctrl+C a *second* time (double-tap), `system.py` triggers `os._exit(1)` — a hard stop that bypasses the home sequence, acting as a secondary software-level emergency stop.
-    *   Note: a soft stop issued *during* a blocking gripper actuation completes that actuation first; motion (the higher-risk part) is interruptible because moves are non-blocking.
+## 6. Diagnostic 2x2 Video Mosaic (`RunRecorder`)
 
-### 7.3. Pre-Check Phase & Failure Shake
-*   **The Mechanism:** Before the robot even begins moving, it must verify the target actually exists.
-*   **The Logic:**
-    *   In both `eval` and `auto` modes, the robot transitions to `PRE_CHECK` first.
-    *   The top-down camera masks for the target color inside the designated source zone.
-    *   The task only proceeds if the detected color pixel mass exceeds `FRONT_MIN_PRESENCE_PX` (default: 1500 px).
-    *   If the target object is missing, the robot remains in place, executes a fast, physical "no-no shake" (rotating the wrist back and forth to visually signal failure to the user), and aborts the FSM without trying to pick up empty space.
+When initialized with the `--video` flag, a background thread records a diagnostic MP4 mosaic at $10\text{ fps}$ to monitor perception performance without blocking the arm's control loops.
 
-### 7.4. Before/After Snapshot Verification
-*   **The Mechanism:** High-accuracy logging and auditing.
-*   **The Logic:**
-    *   Before executing any FSM step, the top-down camera saves a baseline image: `snapshot_eval_front_before.jpg`.
-    *   After the drop-off is complete and the arm returns home, another snapshot is taken: `snapshot_eval_front_after.jpg`.
-    *   A visualization function overlays white bounding boxes around the active check-in/storage/check-out zones and draws a green bounding box around the detected target object (using HSV contours) to verify successful task execution.
-
-### 7.5. FSM Error Recovery & Retries
-*   **The Mechanism:** Handling unexpected failures (e.g., the object slips, or visual servoing loses target tracking).
-*   **The Logic:**
-    *   If visual servoing fails to lock onto the target within `vla_timeout` (default: 15 seconds), the search retries counter increments.
-    *   If the retry limit (`max_retries`) is not exceeded, the arm returns to `HOME_POSE`, resets its state, approaches the workspace again, and restarts the visual servoing loop.
-    *   If the visual servoing fails repeatedly, the robot drops back to `HOME_POSE` and halts in a `FAILED` state to prevent endless looping or erratic behaviors.
+```
+┌───────────────────────────────────────┬───────────────────────────────────────┐
+│ PANEL A: Annotated Color              │ PANEL B: Depth Colormap               │
+│ Shows the RGB feed with bounding      │ Displays normalized depth values      │
+│ boxes, 3D metric coordinates, and     │ using the Jet colormap. Filled with   │
+│ active target tracking crosses.       │ black in stream-only (no-depth) mode. │
+├───────────────────────────────────────┼───────────────────────────────────────┤
+│ PANEL C: Raw Color Mask               │ PANEL D: Isometric 3D Point Cloud     │
+│ The raw, binary HSV mask before       │ An interactive metric reconstruction  │
+│ height gating or top-face processing  │ of the scene, projected onto a virtual│
+│ is applied. Helps diagnose lighting.  │ 3D camera to evaluate alignment.      │
+└───────────────────────────────────────┴───────────────────────────────────────┘
+```

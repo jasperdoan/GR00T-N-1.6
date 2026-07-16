@@ -26,6 +26,7 @@ from utils.vision.detection import (       # noqa: F401
     find_object_blob,
     find_all_blobs,
     count_objects_in_zone,
+    count_all_colors_in_zone,
     select_blob_near,
     refine_blob,
     check_color_presence,

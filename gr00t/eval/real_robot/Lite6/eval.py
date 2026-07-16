@@ -144,6 +144,8 @@ def main():
             )
             final_state = fsm.run()
             if final_state != FSMState.DONE:
+                # DONE_RETURNED included: the target zone is full, so draining
+                # further cubes would just carry each one there and back.
                 break
             completed += 1
         else:
@@ -153,7 +155,10 @@ def main():
         robot.move_to(*HOME_POSE[:3])
         time.sleep(1.0)
 
-        if final_state is not None and final_state != FSMState.DONE:
+        if final_state == FSMState.DONE_RETURNED:
+            print(f"\n[EVAL] RETURNED — {target_zone} is full; the cube went back "
+                  f"to its pickup point ({completed} cube(s) delivered first).")
+        elif final_state is not None and final_state != FSMState.DONE:
             print(f"\n[EVAL] FAILED — task did not complete ({completed} cube(s) delivered first).")
         elif completed == 0:
             print(f"\n[EVAL] NOTHING TO DO — no '{target_object}' found in {source_zone}.")

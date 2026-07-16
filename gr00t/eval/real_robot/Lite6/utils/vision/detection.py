@@ -358,6 +358,29 @@ def count_objects_in_zone(
     return len(blobs), blobs, px_mass
 
 
+def count_all_colors_in_zone(
+    frame: np.ndarray,
+    zone_roi,
+    depth_mm: Optional[np.ndarray] = None,
+) -> Tuple[int, List[BlobCandidate]]:
+    """
+    Occupancy census across EVERY color in COLOR_RANGES: drop clearance and
+    zone-full detection must see cubes of ANY color, not just the task's
+    target color (a blue cube in storage still occupies a drop spot when
+    sorting red). Same per-color path as count_objects_in_zone (mask →
+    height gate → ZONE_* blob gates → touching-cube split). COLOR_RANGES
+    entries are pairwise disjoint by contract, so summing per-color blobs
+    cannot double-count one cube. Returns (total_count, blobs largest-first).
+    """
+    all_blobs: List[BlobCandidate] = []
+    for color_name in COLOR_RANGES:
+        count, blobs, _px = count_objects_in_zone(
+            frame, f"{color_name} cube", zone_roi, depth_mm=depth_mm)
+        all_blobs.extend(blobs)
+    all_blobs.sort(key=lambda b: b.area, reverse=True)
+    return len(all_blobs), all_blobs
+
+
 def select_blob_near(
     blobs: List[BlobCandidate],
     near_px: Tuple[int, int],

@@ -15,14 +15,20 @@ States:
                    re-measure fresh → refine at 250 mm → lock → yaw-align →
                    descend → vacuum grasp (+ suction feedback) → lift
   TRANSPORT      → blended move to a randomized target-zone drop point
-                   (yaw straightens; clearance from cubes already there), drop
+                   (yaw straightens; clearance from objects of ANY color
+                   already there), drop
+  RETURNING      → the target zone is FULL (no sampled drop point even clears
+                   a cube footprint): carry the cube back to its recorded
+                   pickup point, place it at the measured grasp height, and
+                   end DONE_RETURNED (a distinct success, not a failure)
   RECOVERY       → move fault mid-task → if suction still (maybe) holds,
-                   retry TRANSPORT with a fresh drop point before ever
-                   releasing; only release + re-home + retry-scan/fail once
-                   confirmed empty or the hold-retry budget is spent
+                   retry TRANSPORT (or RETURNING) with a fresh drop point
+                   before ever releasing; only release + re-home +
+                   retry-scan/fail once confirmed empty or the hold-retry
+                   budget is spent
   VERIFY         → confirm the TARGET zone GREW (count-delta, not presence —
                    the zone may already hold identical cubes)
-  DONE / FAILED
+  DONE / DONE_RETURNED / FAILED
 
 Safety / robustness:
   - Every move checks its return code; faults route to recovery/FAILED.
@@ -61,16 +67,20 @@ from utils.constants import (
     ZONE_BLOB_MIN_AREA_PX, ZONE_BLOB_MAX_AREA_PX,
     PLACE_MARGIN_MM, PLACE_CLEARANCE_MM, PLACE_SAMPLE_ATTEMPTS,
     PLACE_MIN_FALLBACK_CLEARANCE_MM,
+    FREE_SPACE_S_MAX, FREE_SPACE_V_MIN, PLACE_FREE_MIN_CLEARANCE_MM,
     TRANSPORT_BLEND_RADIUS_MM,
     TRANSPORT_IK_RETRIES, MAX_RECOVERY_RETRIES,
     VERIFY_RECHECKS, VERIFY_MASS_DELTA_MIN_PX,
     GRASP_FEEDBACK_ENABLED,
-    WORKSPACE_X_RANGE, WORKSPACE_Y_RANGE,
+    WORKSPACE_X_RANGE, WORKSPACE_Y_RANGE, WORKSPACE_Z_RANGE,
     OBJECT_HEIGHT_MM, TABLE_Z_FALLBACK_MM, DEPTH_MIN_PLAUSIBLE_MM,
+    GRASP_DEPTH_ADAPT_ENABLED, GRASP_Z_MAX_LOWER_MM, GRASP_Z_MAX_RAISE_MM,
+    GRASP_TOP_SANE_BAND_MM, GRASP_PRESS_DOWN_MM,
 )
 from utils.vision import (
     find_all_blobs,
     count_objects_in_zone,
+    count_all_colors_in_zone,
     visual_servo_to_grasp,
     read_fresh,
     load_extrinsics,
@@ -81,6 +91,7 @@ from utils.vision import (
     estimate_table_z,
     robust_depth_at,
 )
+from utils.vision.helpers import to_bgr
 
 
 class FSMState(Enum):
@@ -89,9 +100,12 @@ class FSMState(Enum):
     GLOBAL_APPROACH  = auto()
     FINE_GRASP       = auto()
     TRANSPORT        = auto()
+    RETURNING        = auto()   # target zone full → carry cube back to pickup point
     RECOVERY         = auto()
     VERIFY           = auto()
     DONE             = auto()
+    DONE_RETURNED    = auto()   # terminal: cube returned to origin (zone full);
+                                # a distinct successful outcome, NOT a failure
     FAILED           = auto()
 
 
@@ -148,10 +162,20 @@ class Lite6FSM:
         self._chosen_blob           = None # the SCANNING-selected source blob
         self._target_base           = None # its base-frame (x, y, z|None) mm — the
                                            # servo's world-frame target identity
+        # Return-to-origin bookkeeping (target zone full): the PBVS-measured
+        # pickup point and the descend height actually used to grasp there.
+        self._pickup_xy             = None
+        self._grasp_z_used          = GRASP_Z
+        self._returning             = False
         # Drop rect needs the table-z estimate, so it is computed lazily on
         # first use (TRANSPORT) rather than here.
         self._drop_rect             = None
         self._drop_rect_computed    = False
+        # Free-space drop planning, computed at PRE_CHECK from the top view
+        # (white table = empty; distance-transform peak = farthest from every
+        # obstacle and the zone edge):
+        self._planned_drop          = None   # (x, y) mm, or None
+        self._free_space_full       = False  # analysis ran and found NO spot
 
     # -------------------------------------------------------------------------
     # Public entry point
@@ -164,17 +188,20 @@ class Lite6FSM:
             FSMState.GLOBAL_APPROACH: self._handle_global_approach,
             FSMState.FINE_GRASP:      self._handle_fine_grasp,
             FSMState.TRANSPORT:       self._handle_transport,
+            FSMState.RETURNING:       self._handle_returning,
             FSMState.RECOVERY:        self._handle_recovery,
             FSMState.VERIFY:          self._handle_verify,
         }
         # Soft-stop semantics (SO-ARM style): a stop may abort the task only
         # BEFORE the arm has committed to the object. From TRANSPORT onward
         # (object in gripper) the FSM runs to completion — finish the carry,
-        # drop it in the target zone, verify — and the caller's loop exits
-        # afterwards. Commitment point = servo lock inside FINE_GRASP.
+        # drop it in the target zone (or back at its pickup point when the
+        # zone is full), verify — and the caller's loop exits afterwards.
+        # Commitment point = servo lock inside FINE_GRASP.
         abortable = {FSMState.PRE_CHECK, FSMState.SCANNING,
                      FSMState.GLOBAL_APPROACH, FSMState.FINE_GRASP}
-        while self.state not in (FSMState.DONE, FSMState.FAILED):
+        while self.state not in (FSMState.DONE, FSMState.DONE_RETURNED,
+                                 FSMState.FAILED):
             if self.state in abortable and self._check_abort():
                 break
             handlers[self.state]()
@@ -387,17 +414,111 @@ class Lite6FSM:
             return None
         return xmin, xmax, ymin, ymax
 
+    def _plan_drop_point(self, frame_rgb):
+        """
+        Free-space drop planning from the PRE_CHECK top view. The work surface
+        is WHITE, so emptiness is detected directly: white(-ish) pixels inside
+        the target zone ROI are free, everything else — a cube of ANY color
+        (known or not), a stray object, deep shadow — is occupied, and so is
+        everything outside the ROI (the boundary repels drops the same way a
+        cube does). A distance transform then finds the free pixel FARTHEST
+        from all of that: the drop lands as deep in open space as the zone
+        allows, instead of hoping one of the random samples happens to fall in
+        the empty pocket.
+
+        Sets self._planned_drop (x, y) mm and self._free_space_full; leaves
+        both cleared when the analysis can't run (no table height / bad ROI /
+        unmappable pixel) so TRANSPORT falls back to the random sampler.
+        """
+        self._planned_drop = None
+        self._free_space_full = False
+        if self._table_z is None:
+            return
+        roi = ZONE_PIXEL_ROI.get(self.target_zone)
+        if roi is None:
+            return
+
+        hsv = cv2.cvtColor(to_bgr(frame_rgb), cv2.COLOR_BGR2HSV)
+        white = cv2.inRange(hsv, (0, 0, FREE_SPACE_V_MIN),
+                            (180, FREE_SPACE_S_MAX, 255))
+        x, y, w, h = roi
+        H_img, W_img = white.shape[:2]
+        x = max(0, min(x, W_img - 1)); y = max(0, min(y, H_img - 1))
+        w = max(1, min(w, W_img - x)); h = max(1, min(h, H_img - y))
+        free = np.zeros_like(white)
+        free[y:y + h, x:x + w] = white[y:y + h, x:x + w]
+        # OPEN kills false-free specks (glare dots on cube tops); CLOSE fills
+        # false-occupied specks (dust/smudges on the white table) so a clean
+        # pocket isn't carved into worthless slivers.
+        k = np.ones((5, 5), np.uint8)
+        free = cv2.morphologyEx(free, cv2.MORPH_OPEN, k)
+        free = cv2.morphologyEx(free, cv2.MORPH_CLOSE, k)
+
+        dist = cv2.distanceTransform((free > 0).astype(np.uint8), cv2.DIST_L2, 5)
+        _mn, max_px, _mnloc, (u, v) = cv2.minMaxLoc(dist)
+        if max_px <= 0:
+            self._free_space_full = True
+            print(f"[PRE_CHECK] {self.target_zone}: no white free space in the "
+                  f"zone at all — FULL.")
+            return
+
+        # Pixel radius → mm via two ray-plane casts on the table plane (the
+        # px/mm scale varies mildly across the view; this measures it locally).
+        R, t = self.extrinsics
+        tcp = TOP_VIEW_POSE[:3]
+        p0 = pixel_to_base_on_plane(u, v, self._table_z, tcp, R, t, self.intrinsics)
+        p1 = pixel_to_base_on_plane(u + max_px, v, self._table_z, tcp, R, t,
+                                    self.intrinsics)
+        if p0 is None or p1 is None:
+            return
+        clearance_mm = ((p1[0] - p0[0]) ** 2 + (p1[1] - p0[1]) ** 2) ** 0.5
+        if clearance_mm < PLACE_FREE_MIN_CLEARANCE_MM:
+            self._free_space_full = True
+            print(f"[PRE_CHECK] {self.target_zone}: largest free spot clears "
+                  f"only {clearance_mm:.0f} mm (< "
+                  f"{PLACE_FREE_MIN_CLEARANCE_MM:.0f}) — FULL; a picked cube "
+                  f"will be returned to its pickup point.")
+            return
+        self._planned_drop = (float(p0[0]), float(p0[1]))
+        print(f"[PRE_CHECK] Planned drop (free-space peak) at "
+              f"({p0[0]:.1f}, {p0[1]:.1f}) — {clearance_mm:.0f} mm clear of "
+              f"every obstacle and the zone edge.")
+
     def _sample_drop_point(self):
         """
-        Random drop point in the target zone: uniform over the drop rect,
-        reachable at TRANSPORT_Z_MM and GRASP_Z, and at least PLACE_CLEARANCE_MM from
-        every cube seen in the target zone at PRE_CHECK (so cube #2 never lands
-        on cube #1). Falls back to the best-clearance sample, then to the
-        nominal ZONES point. Returns (x, y), or None for an unknown zone.
+        Drop point in the target zone, best source first:
+          1. The PRE_CHECK free-space plan (white-table distance-transform
+             peak — farthest from every obstacle AND the zone edge), consumed
+             one-shot so retries don't loop on an unreachable point.
+          2. Random sampling over the drop rect: reachable at TRANSPORT_Z_MM
+             and GRASP_Z, at least PLACE_CLEARANCE_MM from every object seen
+             at PRE_CHECK (any color), best-effort when merely crowded.
+        Returns (x, y), or None when the zone is FULL — the free-space
+        analysis found no spot, or every sample landed within a cube footprint
+        of an occupied spot (caller routes to RETURNING). The caller must
+        have validated the zone name (unknown zones are its problem).
         """
-        zone = ZONES.get(self.target_zone)
-        if zone is None:
+        if self._free_space_full:
+            print(f"[TRANSPORT] {self.target_zone} is FULL (PRE_CHECK "
+                  f"free-space analysis found no spot with "
+                  f"{PLACE_FREE_MIN_CLEARANCE_MM:.0f} mm clearance) — "
+                  f"returning the cube to its pickup point.")
             return None
+
+        if self._planned_drop is not None:
+            px_, py_ = self._planned_drop
+            self._planned_drop = None   # one-shot: retries use the sampler
+            if (self.robot.in_workspace(px_, py_, TRANSPORT_Z_MM)
+                    and self.robot.in_workspace(px_, py_, GRASP_Z)
+                    and self.robot.is_pose_reachable(px_, py_, TRANSPORT_Z_MM)
+                    and self.robot.is_pose_reachable(px_, py_, GRASP_Z)):
+                print(f"[TRANSPORT] Using the free-space planned drop "
+                      f"({px_:.1f}, {py_:.1f}).")
+                return px_, py_
+            print(f"[TRANSPORT] Planned drop ({px_:.1f}, {py_:.1f}) is outside "
+                  f"the envelope/reach — falling back to random sampling.")
+
+        zone = ZONES[self.target_zone]
         nominal = (zone["x"], zone["y"])
 
         if not self._drop_rect_computed:
@@ -440,13 +561,22 @@ class Lite6FSM:
                 best, best_clearance = (sx, sy), clearance
 
         # Nothing met the clearance: take the least-crowded sample if it at
-        # least clears a cube's footprint, else the nominal point.
+        # least clears a cube's footprint.
         if best is not None and best_clearance > PLACE_MIN_FALLBACK_CLEARANCE_MM:
             print(f"[TRANSPORT] Zone crowded — best-clearance drop "
                   f"({best[0]:.1f}, {best[1]:.1f}) ({best_clearance:.0f} mm).")
             return best
-        print("[TRANSPORT] Zone crowded/unreachable — using the nominal drop point.")
-        return nominal
+        if best is None:
+            # Every sample failed the envelope/IK checks — a reachability
+            # problem, not fullness; the nominal point is the safe default.
+            print("[TRANSPORT] No reachable sample — using the nominal drop point.")
+            return nominal
+        # Genuinely saturated: even the best sample would land on a cube.
+        print(f"[TRANSPORT] {self.target_zone} is FULL (best clearance "
+              f"{best_clearance:.0f} mm < {PLACE_MIN_FALLBACK_CLEARANCE_MM:.0f} mm "
+              f"over {PLACE_SAMPLE_ATTEMPTS} samples) — returning the cube to "
+              f"its pickup point.")
+        return None
 
     # -------------------------------------------------------------------------
     # Camera helpers (single camera; "top-down" = arm parked at TOP_VIEW_POSE)
@@ -535,6 +665,49 @@ class Lite6FSM:
                     out.append(xy)
         return out
 
+    def _compute_grasp_z(self, est_z) -> float:
+        """
+        Depth-adaptive descend height. GRASP_Z is the empirically correct TCP
+        height for a NOMINAL cube (top at table_z + OBJECT_HEIGHT_MM), so the
+        adaptive height is GRASP_Z shifted by the measured top face's DELTA
+        from nominal — the working press force is inherited, short cubes get
+        a deeper press, tall objects a higher stop. Clamped asymmetrically
+        (−GRASP_Z_MAX_LOWER_MM / +GRASP_Z_MAX_RAISE_MM), floored at the
+        workspace envelope. Falls back to the fixed GRASP_Z whenever depth or
+        the table estimate is missing or the measured height is implausible.
+
+        GRASP_PRESS_DOWN_MM is SUBTRACTED on EVERY path (adaptive or
+        fallback): lower Z = closer to the table in this robot's convention,
+        so "press further past the measured/nominal surface" means going to
+        a SMALLER Z, same direction a short cube's delta already pushes —
+        stacking them (not one cancelling the other) is what actually presses
+        the cup down past the point where depth says the surface sits.
+        """
+        if not GRASP_DEPTH_ADAPT_ENABLED:
+            return float(GRASP_Z - GRASP_PRESS_DOWN_MM)
+        top_z = est_z
+        if top_z is None and self._target_base is not None:
+            top_z = self._target_base[2]
+        if top_z is None or self._table_z is None:
+            print("[FINE_GRASP] No depth-measured top height "
+                  f"(top_z={top_z}, table_z={self._table_z}) — using fixed "
+                  f"GRASP_Z={GRASP_Z} - {GRASP_PRESS_DOWN_MM:.1f} press.")
+            return float(GRASP_Z - GRASP_PRESS_DOWN_MM)
+        height = top_z - self._table_z
+        lo, hi = GRASP_TOP_SANE_BAND_MM
+        if not (lo <= height <= hi):
+            print(f"[FINE_GRASP] Measured object height {height:.1f} mm outside "
+                  f"the sane band [{lo:.0f}, {hi:.0f}] — using fixed "
+                  f"GRASP_Z={GRASP_Z} - {GRASP_PRESS_DOWN_MM:.1f} press.")
+            return float(GRASP_Z - GRASP_PRESS_DOWN_MM)
+        delta = top_z - (self._table_z + OBJECT_HEIGHT_MM)
+        delta = max(-GRASP_Z_MAX_LOWER_MM, min(GRASP_Z_MAX_RAISE_MM, delta))
+        grasp_z = max(GRASP_Z + delta - GRASP_PRESS_DOWN_MM, WORKSPACE_Z_RANGE[0])
+        print(f"[FINE_GRASP] Depth-adaptive grasp Z: top {top_z:.1f} "
+              f"(table {self._table_z:.1f}, height {height:.1f}) → "
+              f"Z={grasp_z:.1f} (nominal {GRASP_Z} - {GRASP_PRESS_DOWN_MM:.1f} press).")
+        return float(grasp_z)
+
     # -------------------------------------------------------------------------
     # State handlers
     # -------------------------------------------------------------------------
@@ -564,16 +737,24 @@ class Lite6FSM:
 
         # Baseline the TARGET zone from the same frame — the only top view we
         # get before the arm is mid-carry. VERIFY passes on count/mass GROWTH
-        # over this baseline, and the placement sampler keeps clear of the
-        # occupied spots.
+        # over this baseline (target color only — that's our verify signal),
+        # while the placement sampler must keep clear of cubes of ANY color,
+        # so occupancy comes from the all-color census.
         target_roi = ZONE_PIXEL_ROI.get(self.target_zone)
-        self._baseline_target_count, tgt_blobs, self._baseline_target_mass = \
+        self._baseline_target_count, _tgt_blobs, self._baseline_target_mass = \
             count_objects_in_zone(frame_rgb, self.target_object, target_roi,
                                   depth_mm=depth_mm)
-        self._occupied_target_xy = self._blobs_to_base_xy(tgt_blobs, depth_mm)
+        n_all, all_blobs = count_all_colors_in_zone(frame_rgb, target_roi,
+                                                    depth_mm=depth_mm)
+        self._occupied_target_xy = self._blobs_to_base_xy(all_blobs, depth_mm)
+        # Primary drop plan: white-table free-space analysis of the same frame
+        # (sees obstacles of ANY color; also decides zone-full up front).
+        self._plan_drop_point(frame_rgb)
 
         print(f"[PRE_CHECK PASSED] {n_src} object(s) in {self.source_zone}; "
-              f"{self._baseline_target_count} already in {self.target_zone}. Proceeding.")
+              f"{self._baseline_target_count} '{self.target_object}' already in "
+              f"{self.target_zone} ({n_all} object(s) of any color occupy it). "
+              f"Proceeding.")
         self.state = FSMState.SCANNING
 
     def _choose_source_blob(self, frame_rgb, depth_mm=None):
@@ -719,7 +900,7 @@ class Lite6FSM:
     def _handle_fine_grasp(self):
         print("\n─── [FSM: FINE_GRASP] PBVS alignment + grasp ────────────────")
 
-        locked, obj_angle, grasp_xy = visual_servo_to_grasp(
+        locked, obj_angle, grasp_xy, est_z = visual_servo_to_grasp(
             cap=self.cap,
             robot=self.robot,
             target_object=self.target_object,
@@ -743,16 +924,24 @@ class Lite6FSM:
         # that geometry lives in the extrinsics.
         grasp_x, grasp_y = grasp_xy
 
+        # Depth-adaptive descend height, and the return-to-origin bookkeeping
+        # (if the target zone turns out to be full, RETURNING puts the cube
+        # back exactly here at exactly this height).
+        grasp_z = self._compute_grasp_z(est_z)
+        self._grasp_z_used = grasp_z
+        self._pickup_xy = (grasp_x, grasp_y)
+        self._returning = False   # fresh manipulation — clear any stale flag
+
         # Determine target yaw (measurements ran at yaw=0; rotate only now)
         grasp_yaw = 0.0
         if YAW_ALIGN_ENABLED and obj_angle is not None and abs(obj_angle) > 1.0:
             grasp_yaw = CAMERA_YAW_SIGN * obj_angle + CAMERA_YAW_OFFSET
 
-        print(f"[FINE_GRASP] Descend to ({grasp_x:.1f}, {grasp_y:.1f}, {GRASP_Z}) "
+        print(f"[FINE_GRASP] Descend to ({grasp_x:.1f}, {grasp_y:.1f}, {grasp_z:.1f}) "
               f"| Yaw: {grasp_yaw:.1f}°")
 
         # ONE SIMULTANEOUS MOTION: Move X, Y, Z, and Yaw together.
-        if not self._safe_move(grasp_x, grasp_y, GRASP_Z, yaw=grasp_yaw,
+        if not self._safe_move(grasp_x, grasp_y, grasp_z, yaw=grasp_yaw,
                                speed=FINE_ADJUST_SPEED, interruptible=False):
             if self._fail_or_retry("Combined descent/alignment move failed"):
                 self.state = FSMState.FAILED
@@ -800,10 +989,16 @@ class Lite6FSM:
     def _handle_transport(self):
         print("\n─── [FSM: TRANSPORT] Scripted transport to target zone ──────")
 
-        drop = self._sample_drop_point()
-        if drop is None:
+        if ZONES.get(self.target_zone) is None:
             print(f"[TRANSPORT] Unknown target zone: {self.target_zone}")
             self.state = FSMState.RECOVERY
+            return
+
+        drop = self._sample_drop_point()
+        if drop is None:
+            # Zone is FULL (the sampler already logged it) — carry the cube
+            # back to its pickup point instead of stacking it on another one.
+            self.state = FSMState.RETURNING
             return
 
         # get_inverse_kinematics has no fixed ref_angles, so a point sampled as
@@ -821,7 +1016,8 @@ class Lite6FSM:
                       f"{TRANSPORT_IK_RETRIES}) — drawing a fresh point.")
                 drop = self._sample_drop_point()
                 if drop is None:
-                    break
+                    self.state = FSMState.RETURNING
+                    return
                 continue
 
             ok, moved = self._attempt_transport_drop(drop_x, drop_y)
@@ -831,7 +1027,8 @@ class Lite6FSM:
                   f"{TRANSPORT_IK_RETRIES}) — drawing a fresh point.")
             drop = self._sample_drop_point()
             if drop is None:
-                break
+                self.state = FSMState.RETURNING
+                return
 
         if not ok and not moved:
             # Every resampled point was pre-flight-rejected: try the nominal
@@ -854,6 +1051,55 @@ class Lite6FSM:
         self._safe_move(drop_x, drop_y, TRANSPORT_Z_MM, speed=FINE_ADJUST_SPEED, interruptible=False)
         self.state = FSMState.VERIFY
 
+    def _handle_returning(self):
+        """
+        Target zone full: carry the cube back to its recorded pickup point and
+        place it there — a distinct, successful outcome (DONE_RETURNED), not a
+        failure. The pickup spot is free by construction (we just vacated it),
+        and the descend reuses the exact grasp height measured for this cube.
+        Committed like TRANSPORT (cube in gripper — soft stop won't abort it).
+        """
+        print("\n─── [FSM: RETURNING] Target zone full — returning cube ──────")
+        self._returning = True
+
+        if self._pickup_xy is None:
+            # Set at FINE_GRASP before any grasp can succeed; only a code path
+            # that skipped the grasp could land here.
+            print("[RETURNING] No recorded pickup point — recovering.")
+            self.state = FSMState.RECOVERY
+            return
+        px, py = self._pickup_xy
+
+        # Same at-move-time IK caveat as TRANSPORT: the point was reachable at
+        # pick time, but the solver is seeded by the current joint configuration.
+        if not (self.robot.is_pose_reachable(px, py, TRANSPORT_Z_MM)
+                and self.robot.is_pose_reachable(px, py, self._grasp_z_used)):
+            print(f"[RETURNING] Pickup point ({px:.1f}, {py:.1f}) not reachable "
+                  f"from here — recovering.")
+            self.state = FSMState.RECOVERY
+            return
+
+        print(f"[RETURNING] Carrying cube back to ({px:.1f}, {py:.1f}), blended "
+              f"descend to Z={self._grasp_z_used:.1f}...")
+        ok, _moved = self._blended_move([
+            dict(x=px, y=py, z=TRANSPORT_Z_MM, yaw=0.0,
+                 speed=DEFAULT_SPEED, radius=TRANSPORT_BLEND_RADIUS_MM),
+            dict(x=px, y=py, z=self._grasp_z_used, yaw=0.0,
+                 speed=FINE_ADJUST_SPEED),
+        ])
+        if not ok:
+            self.state = FSMState.RECOVERY
+            return
+
+        self.robot.stop_vacuum()   # vent, dwell, then de-energize the valve
+
+        print(f"[RETURNING] Lifting back to Z={TRANSPORT_Z_MM}...")
+        self._safe_move(px, py, TRANSPORT_Z_MM, speed=FINE_ADJUST_SPEED,
+                        interruptible=False)
+        print(f"[RETURNING] Cube returned to ({px:.1f}, {py:.1f}) — "
+              f"{self.target_zone} is full; task ends DONE_RETURNED.")
+        self.state = FSMState.DONE_RETURNED
+
     def _handle_recovery(self):
         print("\n─── [FSM: RECOVERY] Move fault mid-task ─────────────────────")
         if self.robot.has_error():
@@ -867,8 +1113,10 @@ class Lite6FSM:
         held, _raw = self.robot.check_grasp()
         if held is not False and self._recovery_retries < MAX_RECOVERY_RETRIES:
             self._recovery_retries += 1
+            retry_state = (FSMState.RETURNING if self._returning
+                           else FSMState.TRANSPORT)
             print(f"[RECOVERY] Suction still {'holds' if held else 'may hold'} the "
-                  f"object — retrying TRANSPORT instead of releasing "
+                  f"object — retrying {retry_state.name} instead of releasing "
                   f"(attempt {self._recovery_retries}/{MAX_RECOVERY_RETRIES}).")
             pos = self.robot.get_current_position()
             if pos is not None:
@@ -877,7 +1125,7 @@ class Lite6FSM:
                 # outside it, and straight up is safe anywhere).
                 self.robot.move_to(pos[0], pos[1], TRANSPORT_Z_MM,
                                    speed=FINE_ADJUST_SPEED, wait=True)
-            self.state = FSMState.TRANSPORT
+            self.state = retry_state
             return
 
         # Confirmed empty, or out of hold-retry budget: release, re-home, and

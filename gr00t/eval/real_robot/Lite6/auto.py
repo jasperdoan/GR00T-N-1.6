@@ -30,7 +30,10 @@ from utils.system  import (
     setup_signal_handlers, clear_stop_flag, set_stop_flag,
     set_in_use, clear_in_use, is_stop_requested,
 )
-from utils.vision  import count_objects_in_zone, save_workspace_snapshot, open_camera, read_fresh, RunRecorder
+from utils.vision  import (
+    count_objects_in_zone, count_all_colors_in_zone, save_workspace_snapshot,
+    open_camera, read_fresh, RunRecorder,
+)
 from utils.robot   import Lite6Controller
 from utils.fsm     import Lite6FSM, FSMState
 from utils.nlp     import TASK_ZONE_MAP
@@ -39,7 +42,7 @@ from utils.nlp     import TASK_ZONE_MAP
 AUTO_TARGET = "red cube"
 
 
-def detect_next_task(front_rgb, target_object=AUTO_TARGET, depth_mm=None):
+def detect_next_task(front_rgb, target_object=AUTO_TARGET, depth_mm=None, blocked=None):
     """
     Zone-driven task selection (ported from SO100): scan each task's SOURCE zone
     ROI and return the first task whose source zone currently holds >= 1 of the
@@ -47,17 +50,37 @@ def detect_next_task(front_rgb, target_object=AUTO_TARGET, depth_mm=None):
     check_out legitimately triggers check_back; that's the intended sorting
     behavior, not a stray pick. With depth, the height gate physically excludes
     table-level phantoms from the census.
+
+    blocked: {task_type: target-zone occupancy at the moment it was declared
+    full}. A blocked task (its last run ended DONE_RETURNED) is skipped until
+    its target zone's all-color occupancy DROPS below that count — i.e. a
+    human removed an object and space may exist again; the dict is mutated in
+    place on unblock. Without this, a full zone would loop forever:
+    pick → zone full → return → re-pick the same cube.
     Returns (task_type, source_zone, target_zone) or (None, None, None).
     """
+    blocked = blocked if blocked is not None else {}
     for task_type, zones in TASK_ZONE_MAP.items():
         source_zone = zones["source"]
         roi = ZONE_PIXEL_ROI.get(source_zone)
         count, _blobs, px = count_objects_in_zone(front_rgb, target_object,
                                                   zone_roi=roi, depth_mm=depth_mm)
-        if count >= 1:
-            print(f"[AUTO-SCAN] {count}x '{target_object}' in {source_zone} ({px} px) "
-                  f"→ task {task_type}.")
-            return task_type, source_zone, zones["target"]
+        if count < 1:
+            continue
+        if task_type in blocked:
+            target_zone = zones["target"]
+            n_all, _ = count_all_colors_in_zone(
+                front_rgb, ZONE_PIXEL_ROI.get(target_zone), depth_mm=depth_mm)
+            if n_all >= blocked[task_type]:
+                print(f"[AUTO-SCAN] Skipping {task_type} — {target_zone} still "
+                      f"full ({n_all} object(s), was {blocked[task_type]} when blocked).")
+                continue
+            print(f"[AUTO-SCAN] {target_zone} occupancy dropped "
+                  f"({n_all} < {blocked[task_type]}) — unblocking task {task_type}.")
+            del blocked[task_type]
+        print(f"[AUTO-SCAN] {count}x '{target_object}' in {source_zone} ({px} px) "
+              f"→ task {task_type}.")
+        return task_type, source_zone, zones["target"]
     return None, None, None
 
 
@@ -111,6 +134,7 @@ def main():
         robot.connect()
 
         consecutive_empty = 0
+        blocked = {}   # task_type → target-zone occupancy when declared full
         while True:
             if is_stop_requested():
                 print("\n[AUTO] Stop command received — exiting loop gracefully.")
@@ -150,10 +174,13 @@ def main():
                                     target_object, OUTPUT_DIR_AUTO, ALL_ZONES_DICT)
 
             task_type, source_zone, target_zone = detect_next_task(frame_rgb, target_object,
-                                                                   depth_mm=depth_mm)
+                                                                   depth_mm=depth_mm,
+                                                                   blocked=blocked)
             if task_type is None:
                 consecutive_empty += 1
-                print(f"[AUTO] '{target_object}' not found in any zone "
+                note = (f" ({len(blocked)} task(s) blocked on full zones)"
+                        if blocked else "")
+                print(f"[AUTO] No actionable task for '{target_object}'{note} "
                       f"({consecutive_empty}/{EMPTY_SCAN_GIVE_UP}).")
                 if consecutive_empty >= EMPTY_SCAN_GIVE_UP:
                     # Empty workspace: park, set the stop flag (so the 24/7
@@ -181,16 +208,37 @@ def main():
 
             # Top-view "after" snapshot, then park home.
             robot.move_to(*TOP_VIEW_POSE)
+            after_rgb = after_depth = None
             ret, frame = read_fresh(cap)
             if ret:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                save_workspace_snapshot(frame_rgb, "snapshot_auto_front_after.jpg",
+                after_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                save_workspace_snapshot(after_rgb, "snapshot_auto_front_after.jpg",
                                         target_object, OUTPUT_DIR_AUTO, ALL_ZONES_DICT)
+                if getattr(cap, "has_depth", False):
+                    dret, depth = cap.read_depth()
+                    if dret:
+                        after_depth = depth
             robot.move_to(*HOME_POSE[:3])
             time.sleep(1.0)
 
             if final_state == FSMState.DONE:
                 print("\n[AUTO] Task complete. Rescanning...")
+            elif final_state == FSMState.DONE_RETURNED:
+                # Destination full — cube went back to its pickup point. Block
+                # the task at the zone's current occupancy so it is skipped
+                # until a human removes an object from that zone. Not a
+                # failure: no failure pause needed.
+                if after_rgb is not None:
+                    n_all, _ = count_all_colors_in_zone(
+                        after_rgb, ZONE_PIXEL_ROI.get(target_zone),
+                        depth_mm=after_depth)
+                else:
+                    # No after-frame: fall back to the FSM's PRE_CHECK census.
+                    n_all = len(fsm._occupied_target_xy)
+                blocked[task_type] = n_all
+                print(f"\n[AUTO] {target_zone} full ({n_all} object(s)) — task "
+                      f"{task_type} blocked until an object is removed from it. "
+                      f"Rescanning...")
             else:
                 print("\n[AUTO] Task failed. Rescanning after pause...")
                 time.sleep(SCAN_INTERVAL)

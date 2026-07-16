@@ -21,10 +21,7 @@ Roadmap (documented, not implemented now):
     Guarded descend — monitor joint currents (get_joints_torque) during the final blind descend and stop on contact; protects against height-estimate errors without an F/T sensor.
 
     Grasp-pose ranking — when multiple cubes are candidates, pick the one with the best margin (distance from zone edges/neighbors) instead of random; reduces edge-case failures in crowded zones.
-
-    Use depth for pick up instead of fixed height defined in constants. Generally the height defined in constants are good with most items, but some objects/cubes are slightly shorter than the other, hence it might miss the object by some mm. Maybe we can do depth estimate, and grab the larger height for grasping, not sure...Plan this out, what do you think?
-
-    For the drop destination / target space, ideally we want to drop where there's empty space, so that the cubes are spread out and doesn't collide with each other. Other wise if there's no empty space / meaning the whole space is occupied. We must return the cube to where it was picked up. For example if the cube was picked up at check in at X1 Y2 Z3, going to storage, we see that there's other cubes in storage that's taking up spaces (could be red, blue, or any color, we need to be able to detect prescene), but there's an empty space top right, then it shall drop off the picked up object there. If there's no empty spaces, meaning in this case top right corner is also occupied, so are other spaces. It will return the cube back to X1 Y2 Z3 and end task.
+        What happens when 2 cubes of similar or idential are placed close / next / touching each other. From what I noticed it is grouped up into 1 whole single cube, anyway around this?
 
 ---
 
@@ -46,9 +43,3 @@ Files/folders of interest to update:
 
 
 Requests:
-
-Add more color options (like orange, pink, purple, etc...) | Side notes, what about shapes, does it currently check for solely cubes, or would a hexagon work also as long if its the same color?
-
-Use depth for pick up instead of fixed height defined in constants. Generally the height defined in constants are good with most items, but some objects/cubes are slightly shorter than the other, hence it might miss the object by some mm. Maybe we can do depth estimate, and grab the larger height for grasping, not sure...Plan this out, what do you think?
-
-For the drop destination / target space, ideally we want to drop where there's empty space, so that the cubes are spread out and doesn't collide with each other. Other wise if there's no empty space / meaning the whole space is occupied. We must return the cube to where it was picked up. For example if the cube was picked up at check in at X1 Y2 Z3, going to storage, we see that there's other cubes in storage that's taking up spaces (could be red, blue, or any color, we need to be able to detect prescene), but there's an empty space top right, then it shall drop off the picked up object there. If there's no empty spaces, meaning in this case top right corner is also occupied, so are other spaces. It will return the cube back to X1 Y2 Z3 and end task.
